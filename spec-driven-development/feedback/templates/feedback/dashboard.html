@@ -1,0 +1,51 @@
+{% extends "feedback/base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+{% if reminders %}
+  {# Spec §4: shown only to the person who is behind, never broadcast. #}
+  <div class="reminder">
+    <strong>Time for an update.</strong>
+    You haven't posted in {{ stale_after_days }}+ days on:
+    {% for reminder in reminders %}
+      <a href="{% url 'project_detail' reminder.project.id %}">{{ reminder.project.name }}</a>{% if not forloop.last %}, {% endif %}
+    {% endfor %}
+  </div>
+{% endif %}
+
+<div class="page-head">
+  <h1>Your projects</h1>
+  <a class="primary" href="{% url 'project_create' %}">New project</a>
+</div>
+
+{% if rows %}
+  <table class="projects">
+    <thead>
+      <tr><th>Project</th><th>Status</th><th>Last update</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr>
+          <td><a href="{% url 'project_detail' row.project.id %}">{{ row.project.name }}</a></td>
+          <td class="status">
+            {% if row.latest %}{{ row.latest.icon }} {{ row.latest.get_status_display }}
+            {% else %}<span class="muted">No entries yet</span>{% endif %}
+          </td>
+          <td class="muted">
+            {% if row.latest %}{{ row.latest.created_at|timesince }} ago
+            {% else %}&mdash;{% endif %}
+          </td>
+          <td>{% if row.is_stale %}<span class="badge stale">Stale</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="card">
+    <p>You're not on any projects yet.</p>
+    <p class="muted small">
+      Create one and you'll be its manager, or ask a manager to add you by name.
+    </p>
+  </div>
+{% endif %}
+{% endblock %}
