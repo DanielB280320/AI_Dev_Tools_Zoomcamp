@@ -1,7 +1,7 @@
-### list all installed distros
+### List all installed distros
     wsl.exe -l -v
 
-### destroy distros
+### Destroy distros
     wsl.exe --unregister Ubuntu
     wsl.exe --unregister Debian # and so on
 
@@ -17,11 +17,11 @@
 ### Reboot
 I might have reboot between step 2) and 3) as well.
 
-## list available distributions
+### List available distributions
     wsl --list --online
 
-## install favorite distro
+### Install favorite distro
     wsl --install -d Debian
 
-## set Debian as default
+### Set Debian as default
     wsl --set-default Debian
