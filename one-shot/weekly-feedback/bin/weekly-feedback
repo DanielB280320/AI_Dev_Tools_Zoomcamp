@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Run weekly-feedback straight from the source tree, no install required.
+# Symlink or copy this onto your PATH, e.g.
+#   ln -s "$PWD/bin/weekly-feedback" ~/.local/bin/weekly-feedback
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec env PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" python3 -m weekly_feedback "$@"

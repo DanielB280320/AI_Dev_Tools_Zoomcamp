@@ -1,0 +1,15 @@
+# Example configuration. Copy to the root of your projects directory and
+# run `weekly-feedback` from there.
+
+[defaults]
+days = 7
+format = "markdown"
+fail_under = 60
+
+[[projects]]
+name = "capstone"
+path = "~/projects/capstone"
+
+[[projects]]
+name = "homework"
+path = "~/projects/homework"
