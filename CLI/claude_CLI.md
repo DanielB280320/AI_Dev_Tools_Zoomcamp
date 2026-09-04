@@ -5,6 +5,7 @@
     claude
     claude "your prompt here"
     claude -p "your prompt"
+    claude --dangerously-skip-permissions
 
 ### Slash commands inside a claude session
     /help
