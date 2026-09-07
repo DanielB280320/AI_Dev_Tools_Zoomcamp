@@ -24,6 +24,10 @@ Download the file and save it as plan.md.
 
 It’s also okay not to have a preference and to let the agent select what it thinks will work best.
 
+Sometimes the code agent dont use the newer versions available for the tech stack so we can check that: 
+
+    I want you for every single line of your technology choices I want you to see if there are newer versions available for that
+
 ### Turn the decisions into a backlog
 
     Create a backlog with tasks in _docs/tasks.md.
