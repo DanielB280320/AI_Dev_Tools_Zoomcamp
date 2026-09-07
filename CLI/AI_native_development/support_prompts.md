@@ -1,4 +1,4 @@
-# AI Native Development
+# AI Native Development: Module 1
 
 ### Spec-driven-development: Defining the project/idea
 
@@ -289,3 +289,6 @@ We can now start a fresh session and launch the loop:
 
 Source: https://aishippingblog.com/p/ai-native-development-specifications
 
+---
+
+# Build and Ship an AI-Assisted Full-Stack App: Module 2
