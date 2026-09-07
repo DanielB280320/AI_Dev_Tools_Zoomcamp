@@ -1,1 +1,1 @@
-# Build and Ship an AI-Assisted Full-Stack App: Module 2
+## Build and Ship an AI-Assisted Full-Stack App: Module 2
