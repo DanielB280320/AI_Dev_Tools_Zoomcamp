@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# The default SQLite database, plus its WAL sidecars
+loopboard.db
+loopboard.db-shm
+loopboard.db-wal

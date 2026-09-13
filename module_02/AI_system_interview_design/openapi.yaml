@@ -1,0 +1,1049 @@
+openapi: 3.1.0
+
+info:
+  title: Loopboard API
+  version: 0.1.0
+  summary: Backend contract expected by the Loopboard frontend (system design interview platform).
+  description: |
+    This document specifies the HTTP backend that the existing frontend expects. It was derived
+    from the frontend's API client, `frontend/src/lib/mock-api.ts`, which is a localStorage +
+    BroadcastChannel stand-in for a real server. Every exported function in that module maps to
+    exactly one operation below, and every payload shape is taken from
+    `frontend/src/lib/canvas-types.ts` and the type declarations in `mock-api.ts`.
+
+    ## Domain
+
+    An **interviewer** creates a *session* (a shared architecture canvas), shares a join link,
+    and one or more **candidates** / **observers** join it by opening the link and entering a
+    display name. Everyone edits the same canvas document and sees each other's cursors live.
+    Ending a session freezes the canvas read-only; it can be reopened.
+
+    ## Behaviour the frontend relies on
+
+    * **Timestamps** (`createdAt`, `endedAt`, `lastSeen`, `at`) are epoch **milliseconds**, not
+      seconds — the frontend passes them straight to `new Date(...)` and compares them to
+      `Date.now()`.
+    * **`GET /sessions` must be sorted** by `createdAt` descending; the dashboard renders the
+      array as-is.
+    * **Cursors older than 15 s must be omitted** from `GET /sessions/{sessionId}/cursors`. The
+      mock filters `Date.now() - cursor.at < 15000` on read; the server owns that filtering now.
+    * **Participant colours are assigned by the server** from a fixed palette, cycling by join
+      order: `#37d6c3, #f5b83d, #7dd3fc, #fb7185, #a3e635, #e879f9, #fb923c`.
+    * **String fields are trimmed, with fallbacks** when empty: session `title` →
+      `"Untitled interview"`, session `hostName` → `"Interviewer"`, participant `name` →
+      `"Guest"`.
+    * **Missing session ⇒ `404`, never a 200 with an empty body.** The frontend distinguishes
+      "loading" from "not found" and renders a dedicated invalid-link screen for `404`.
+    * **Canvas writes are hot.** `PUT /canvas` is called on a 120 ms debounce while dragging,
+      cursors are published at up to ~11 Hz, and a heartbeat + presence refresh runs every 4 s
+      per participant. Size limits and rate limits should account for that.
+    * **`DELETE /sessions/{sessionId}/participants/{participantId}` is fired from a
+      `beforeunload` handler**, so it must work as a fire-and-forget request (i.e. tolerate
+      `navigator.sendBeacon`, which can only issue `POST`; see that operation's description).
+
+    ## Realtime
+
+    The frontend's `subscribeToSession(sessionId, handler)` currently uses a `BroadcastChannel`
+    and delivers one of three event kinds — `doc`, `presence`, `session`. The server-side
+    equivalent is `GET /sessions/{sessionId}/events` (Server-Sent Events) below. A WebSocket at
+    `/sessions/{sessionId}/socket` carrying the same three event names is an acceptable
+    substitute; OpenAPI cannot describe it, so it is documented only here.
+
+    Events are **change notifications, not payloads**: on receiving one the frontend re-fetches
+    the canvas or the presence lists. The server does not need to send state in the event.
+
+    ## Authentication
+
+    Two schemes, both bearer tokens:
+
+    * `participantAuth` — session-scoped. Issued by `POST /sessions/{sessionId}/participants`
+      (join). Identifies one participant in one session, and carries their `role`. Required by
+      everything under `/sessions/{sessionId}/...`.
+    * `interviewerAuth` — account-scoped. Identifies a signed-in interviewer. Required by the
+      dashboard endpoints that are not scoped to a single known session id: creating a session,
+      listing all sessions, and deleting one.
+
+    Endpoints requiring **no** authentication:
+
+    * `GET /sessions/{sessionId}` — the join page calls it *before* any identity exists, to
+      validate the link. The unguessable session id is the capability; the response is
+      deliberately low-sensitivity (title, host name, status).
+    * `POST /sessions/{sessionId}/participants` — the join itself. Per spec §2, candidates join
+      anonymously with a link and a display name, no account.
+
+    Host-only operations (`participantAuth` **with `role: interviewer`**, or `interviewerAuth`):
+    end, reopen, and delete a session; remove *another* participant. The frontend already gates
+    these in the UI on `me.role === "interviewer"`, but that check is cosmetic — the server must
+    enforce it.
+
+    > **Gap to close:** the current frontend has no sign-in flow and stores no token. It saves
+    > the whole `Participant` object returned by join into `localStorage`
+    > (`frontend/src/lib/identity.ts`) and sends no credentials on any request. To use this API
+    > as specified, the frontend needs (a) the `token` field added to the join response persisted
+    > alongside the participant and sent as `Authorization: Bearer …`, and (b) an interviewer
+    > sign-in for the dashboard. Until (b) exists, the three `interviewerAuth` operations are the
+    > only ones that cannot be called by the frontend as written.
+
+    ## Authorisation on writes
+
+    A session that is `ended` or has `canvasLocked: true` must reject all canvas writes with
+    `409`. Participants with `role: observer` must be rejected with `403`. The frontend computes
+    the same condition locally (`locked = status === "ended" || role === "observer" ||
+    canvasLocked`) and hides the tools, but again — the server is the authority.
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: https://api.example.com
+    description: Production
+
+security:
+  - participantAuth: []
+
+tags:
+  - name: Sessions
+    description: Session lifecycle — create, list, read, end, reopen, delete.
+  - name: Participants
+    description: Join / leave, presence roster, heartbeats.
+  - name: Cursors
+    description: Live cursor positions, published and polled per session.
+  - name: Canvas
+    description: The shared canvas document and its nodes.
+  - name: Realtime
+    description: Change notifications that replace the frontend's BroadcastChannel.
+
+paths:
+  /sessions:
+    post:
+      tags: [Sessions]
+      operationId: createSession
+      summary: Create an interview session
+      description: |
+        Creates a session in `live` status with an empty canvas, no participants and no cursors.
+        Called from the dashboard (`createSession`); the frontend immediately follows it with a
+        join as `interviewer`.
+      security:
+        - interviewerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "201":
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    get:
+      tags: [Sessions]
+      operationId: listSessions
+      summary: List sessions for the dashboard
+      description: |
+        Returns the calling interviewer's sessions, **sorted by `createdAt` descending**. The
+        dashboard renders the array in order without re-sorting. Includes both `live` and `ended`
+        sessions — past boards are revisitable for scoring (spec §3).
+      security:
+        - interviewerAuth: []
+      responses:
+        "200":
+          description: Sessions, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /sessions/{sessionId}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Read a session
+      description: |
+        Public: the join page calls this before the visitor has any identity, to check that the
+        link is valid and to show the title and host name. Returns `404` for an unknown or
+        deleted session — the frontend renders "This link isn't valid" on `404` and must not be
+        given a `200` with a null body.
+      security: []
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [Sessions]
+      operationId: deleteSession
+      summary: Delete a session and everything in it
+      description: |
+        Permanently removes the session, its canvas document, its participants and its cursors.
+        Called from the dashboard behind a confirmation prompt. Host-only. Idempotent — deleting
+        an already-deleted session returns `204`.
+      security:
+        - interviewerAuth: []
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /sessions/{sessionId}/end:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [Sessions]
+      operationId: endSession
+      summary: End a session (freeze the board)
+      description: |
+        Sets `status: "ended"`, `endedAt` to now, and `canvasLocked: true`. The board becomes
+        read-only for everyone and the final state is retained for later review. Host-only.
+        Emits a `session` event to all subscribers.
+      responses:
+        "200":
+          description: The updated session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sessions/{sessionId}/reopen:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [Sessions]
+      operationId: reopenSession
+      summary: Reopen an ended session
+      description: |
+        Inverse of `endSession`: sets `status: "live"`, `endedAt: null`, `canvasLocked: false`.
+        Host-only. Emits a `session` event.
+      responses:
+        "200":
+          description: The updated session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sessions/{sessionId}/participants:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+
+    post:
+      tags: [Participants]
+      operationId: joinSession
+      summary: Join a session
+      description: |
+        Public — no account needed (spec §2). Creates a participant, assigns the next colour from
+        the palette by join order, sets `lastSeen` to now, and returns the participant together
+        with the `participantAuth` token used for every other call in this session.
+
+        Joining an `ended` session is allowed: the participant gets read-only access so past
+        boards can be reviewed.
+
+        Emits a `presence` event.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JoinSessionRequest"
+      responses:
+        "201":
+          description: Joined.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JoinSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    get:
+      tags: [Participants]
+      operationId: listParticipants
+      summary: List participants currently in the session
+      description: |
+        Drives the presence bar. Polled every 4 s alongside the heartbeat, and re-fetched on every
+        `presence` event. Order is join order (it determines the colour already assigned to each
+        participant, so it should stay stable).
+
+        The server may drop participants whose `lastSeen` is stale (the frontend beats every 4 s,
+        so a ~15 s timeout matches the cursor TTL), which is how a participant who closed their
+        tab without a clean leave disappears from the roster.
+      responses:
+        "200":
+          description: The roster.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Participant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sessions/{sessionId}/participants/{participantId}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/ParticipantId"
+    delete:
+      tags: [Participants]
+      operationId: removeParticipant
+      summary: Leave the session, or remove another participant
+      description: |
+        One operation covers both frontend calls:
+
+        * `leaveSession(sessionId, me.id)` — self-leave, from the "Leave session" button and from
+          the `beforeunload` handler.
+        * `removeParticipant(sessionId, p.id)` — the host removing someone else.
+
+        Removes the participant **and their cursor**, then emits a `presence` event. Idempotent —
+        returns `204` for an unknown participant id.
+
+        Authorisation: the caller must be the participant being removed, or hold `role:
+        interviewer` in this session.
+
+        Because this is also called from `beforeunload`, the server should additionally accept
+        `POST /sessions/{sessionId}/participants/{participantId}/leave` with an empty body and
+        identical semantics, so the frontend can switch to `navigator.sendBeacon` (which cannot
+        issue `DELETE` and cannot set an `Authorization` header — send the participant token in
+        the beacon body in that case).
+      responses:
+        "204":
+          description: Removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /sessions/{sessionId}/participants/{participantId}/heartbeat:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/ParticipantId"
+    post:
+      tags: [Participants]
+      operationId: heartbeat
+      summary: Mark a participant as still present
+      description: |
+        Sets `lastSeen` to now. Called every 4 s per open board. Deliberately cheap: no body, no
+        response body, and it must **not** emit a `presence` event — doing so would wake every
+        subscriber four times a second per participant.
+
+        A no-op for an unknown participant id (the mock returns silently rather than erroring);
+        `204` in that case too, so a client that heartbeats after being removed does not error
+        loop. Clients can detect removal from `GET /participants` instead.
+      responses:
+        "204":
+          description: Recorded.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /sessions/{sessionId}/cursors:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [Cursors]
+      operationId: listCursors
+      summary: List live cursors
+      description: |
+        Returns one entry per participant who has published a cursor in the **last 15 seconds**;
+        the server performs that filtering (`now - at < 15000`). Fetched alongside the participant
+        roster every 4 s and on every `presence` event.
+
+        The caller's own cursor may be included — the frontend filters it out by `participantId`.
+      responses:
+        "200":
+          description: Fresh cursors.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CursorState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sessions/{sessionId}/cursors/{participantId}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - $ref: "#/components/parameters/ParticipantId"
+    put:
+      tags: [Cursors]
+      operationId: publishCursor
+      summary: Publish this participant's cursor position
+      description: |
+        Upsert — replaces any existing cursor for the participant. Coordinates are in **canvas
+        space**, not screen space (the frontend converts before sending), so they are unbounded
+        and may be negative.
+
+        Throttled client-side to one call per 90 ms per participant. Emits a `presence` event;
+        if that proves too chatty, coalescing cursor events server-side is acceptable — the
+        frontend only re-fetches on receipt.
+
+        Callers may only publish their own cursor: `participantId` must match the token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CursorState"
+      responses:
+        "204":
+          description: Published.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /sessions/{sessionId}/canvas:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+
+    get:
+      tags: [Canvas]
+      operationId: getCanvas
+      summary: Read the whole canvas document
+      description: |
+        Returns the full node list. Called on mount and after every `doc` event — this is how late
+        joiners and reconnecting clients resync (spec §5). An empty board is `{"nodes": []}`, never
+        `404`, as long as the session exists.
+      responses:
+        "200":
+          description: The canvas document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CanvasDoc"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      tags: [Canvas]
+      operationId: saveCanvas
+      summary: Replace the whole canvas document
+      description: |
+        Last-write-wins whole-document replace — this is what the frontend actually calls today,
+        on a 120 ms debounce after any edit (`handleChange` in `session.$sessionId.tsx`). It is
+        the only canvas write path currently in use; the node-level operations below exist in the
+        client module but are not yet wired to the UI.
+
+        A whole-document PUT under concurrent editing will drop edits — two people dragging at
+        once means the slower client's document overwrites the faster one's. The mock's own
+        comment flags this ("Real backend would send CRDT ops instead"), and spec §5 calls for a
+        CRDT. Treat this operation as the MVP contract and plan to add a CRDT/op-based channel
+        beside it, not as the end state.
+
+        Rejected with `409` when the session is ended or `canvasLocked`, and `403` for observers.
+        Emits a `doc` event to every subscriber **except**, ideally, the writer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CanvasDoc"
+      responses:
+        "204":
+          description: Saved.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/CanvasLocked"
+        "413":
+          description: Document exceeds the server's size limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /sessions/{sessionId}/canvas/nodes:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    patch:
+      tags: [Canvas]
+      operationId: upsertNodes
+      summary: Insert or update individual nodes
+      description: |
+        Merges the given nodes into the document by `id` — existing ids are replaced, new ids
+        appended. Nodes not mentioned are untouched. Same lock/role rules and `doc` event as
+        `PUT /canvas`.
+
+        Node ids are generated **client-side** (`newNodeId()` → `n_` + 10 chars), so the server
+        must accept ids it has never seen and must not renumber them.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [nodes]
+              properties:
+                nodes:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/CanvasNode"
+      responses:
+        "204":
+          description: Merged.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/CanvasLocked"
+
+  /sessions/{sessionId}/canvas/nodes/delete:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [Canvas]
+      operationId: deleteNodes
+      summary: Delete nodes by id
+      description: |
+        Removes every node whose id appears in `ids`; unknown ids are ignored. Modelled as `POST`
+        rather than `DELETE` because the id list is a body, and multi-select deletion can send
+        many ids at once. Same lock/role rules and `doc` event as `PUT /canvas`.
+
+        Note that deleting a shape does **not** delete arrows anchored to it — the frontend
+        renders a `{shapeId}` endpoint whose shape is gone by falling back to the arrow's last
+        known point. Cascading is a product decision, not a requirement of this contract.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: string
+                  examples:
+                    - ["n_4k2mq7xr9b", "n_pt3wz8dnv2"]
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/CanvasLocked"
+
+  /sessions/{sessionId}/events:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [Realtime]
+      operationId: subscribeToSession
+      summary: Subscribe to session change notifications (SSE)
+      description: |
+        Server-Sent Events stream replacing the frontend's `BroadcastChannel` bus. Exactly three
+        event names, matching `BusEvent["kind"]`:
+
+        | event      | emitted when                                                    | client reaction                          |
+        |------------|-----------------------------------------------------------------|------------------------------------------|
+        | `doc`      | any canvas write (`PUT /canvas`, `PATCH`/`POST` on `nodes`)     | re-`GET /canvas`                         |
+        | `presence` | join, leave, remove, cursor publish                              | re-`GET /participants` and `GET /cursors`|
+        | `session`  | end, reopen (any change to the `Session` object)                 | re-`GET /sessions/{sessionId}`           |
+
+        The `data` payload is not consumed by the frontend — `{"sessionId": "..."}` is enough.
+        Send a comment line or a `: keepalive` every ~20 s to survive proxies, and honour
+        `Last-Event-ID` reconnection if ids are attached.
+
+        A WebSocket at `/sessions/{sessionId}/socket` carrying the same three event names is an
+        acceptable substitute and is the better fit if the CRDT channel from spec §5 lands later;
+        OpenAPI cannot describe it, so it is specified only in this description.
+      responses:
+        "200":
+          description: An open event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                docChanged:
+                  summary: A canvas write happened
+                  value: |
+                    event: doc
+                    data: {"sessionId":"k7m2xp9qrt4wnb3d"}
+
+                    event: presence
+                    data: {"sessionId":"k7m2xp9qrt4wnb3d"}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    participantAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Session-scoped token issued by `POST /sessions/{sessionId}/participants`. Encodes the
+        participant id, the session id and the role. Must be rejected for any other session's
+        endpoints. Should expire with the session (plus a grace period for reviewing ended
+        boards).
+
+    interviewerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Account-scoped token for a signed-in interviewer (spec §2/§6: email+password or SSO).
+        Required by the dashboard operations that are not addressed by a known session id.
+        **Not yet obtained by the frontend** — there is no sign-in screen; see the "Gap to close"
+        note in the API description.
+
+  parameters:
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      description: |
+        Unguessable session identifier. The mock generates 16 characters from the
+        ambiguity-free alphabet `abcdefghijkmnpqrstuvwxyz23456789`; the server owns generation and
+        may use any format, but it must stay URL-safe (it appears in the join link) and long
+        enough to be unguessable (spec §7).
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 64
+      examples:
+        default:
+          value: k7m2xp9qrt4wnb3d
+
+    ParticipantId:
+      name: participantId
+      in: path
+      required: true
+      description: Participant identifier, `p_` + 10 characters in the mock.
+      schema:
+        type: string
+        maxLength: 64
+      examples:
+        default:
+          value: p_9wq4mt2zk7
+
+  responses:
+    BadRequest:
+      description: Malformed body or failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    Unauthorized:
+      description: Missing, malformed or expired token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    Forbidden:
+      description: |
+        Authenticated but not permitted — an observer attempting a canvas write, a non-host
+        attempting to end/reopen/delete a session or remove another participant, or a token scoped
+        to a different session or participant.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    NotFound:
+      description: |
+        No such session (or it was deleted). The frontend treats this as "this link isn't valid"
+        and must receive a `404` rather than a `200` with an empty payload.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    CanvasLocked:
+      description: The session is ended or the canvas is locked, so writes are rejected.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Role:
+      type: string
+      description: |
+        `interviewer` is the host (created the session; may end, reopen, delete, remove
+        participants, clear the canvas). `candidate` has full edit rights. `observer` is
+        read-only. The join screen only offers `candidate` and `observer`; `interviewer` is set by
+        the dashboard's own join immediately after creating a session.
+      enum: [interviewer, candidate, observer]
+
+    SessionStatus:
+      type: string
+      enum: [live, ended]
+
+    Timestamp:
+      type: integer
+      format: int64
+      description: Epoch milliseconds (`Date.now()`), **not** seconds.
+      examples: [1757289600000]
+
+    Session:
+      type: object
+      additionalProperties: false
+      required: [id, title, hostName, status, createdAt, endedAt, canvasLocked]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+          description: Trimmed; falls back to `"Untitled interview"` when the request sends an empty or whitespace-only title.
+          examples: ["Design a URL shortener — Senior BE"]
+        hostName:
+          type: string
+          description: Trimmed; falls back to `"Interviewer"`.
+          examples: ["Alex"]
+        status:
+          $ref: "#/components/schemas/SessionStatus"
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+        endedAt:
+          description: Set when the session is ended, reset to `null` on reopen. Nullable, and the key must always be present.
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        canvasLocked:
+          type: boolean
+          description: |
+            Freezes the board independently of `status`. Set to `true` by `end`, `false` by
+            `reopen`. Kept separate from `status` so a host can lock a live board (spec §2)
+            without ending the interview — the frontend already honours it, though no endpoint
+            toggles it on its own yet.
+
+    CreateSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [title, hostName]
+      properties:
+        title:
+          type: string
+          maxLength: 200
+          description: May be empty — the server substitutes `"Untitled interview"`.
+        hostName:
+          type: string
+          maxLength: 100
+          description: May be empty — the server substitutes `"Interviewer"`.
+
+    Participant:
+      type: object
+      additionalProperties: false
+      required: [id, name, role, color, lastSeen]
+      properties:
+        id:
+          type: string
+          examples: ["p_9wq4mt2zk7"]
+        name:
+          type: string
+          description: Display name, trimmed; falls back to `"Guest"`.
+          examples: ["Jordan"]
+        role:
+          $ref: "#/components/schemas/Role"
+        color:
+          type: string
+          pattern: "^#[0-9a-fA-F]{6}$"
+          description: |
+            Assigned by the server from the fixed palette, cycling by join order:
+            `#37d6c3, #f5b83d, #7dd3fc, #fb7185, #a3e635, #e879f9, #fb923c`. Used for the presence
+            dot and the participant's remote cursor.
+          examples: ["#37d6c3"]
+        lastSeen:
+          $ref: "#/components/schemas/Timestamp"
+
+    JoinSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [name, role]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        role:
+          $ref: "#/components/schemas/Role"
+
+    JoinSessionResponse:
+      description: |
+        The created participant plus its bearer token. The frontend currently persists only the
+        `Participant` fields (`identity.ts`); `token` is the addition needed to authenticate the
+        rest of the session's calls.
+      allOf:
+        - $ref: "#/components/schemas/Participant"
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: Bearer token for `participantAuth`, scoped to this session and participant.
+
+    CursorState:
+      type: object
+      additionalProperties: false
+      required: [participantId, name, color, x, y, at]
+      description: |
+        A participant's pointer position. `name` and `color` are denormalised so a remote cursor
+        can render its label without joining against the roster — the frontend sends them from its
+        own identity and reads them straight back.
+      properties:
+        participantId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          pattern: "^#[0-9a-fA-F]{6}$"
+        x:
+          type: number
+          description: Canvas-space X. Unbounded; may be negative.
+        y:
+          type: number
+          description: Canvas-space Y. Unbounded; may be negative.
+        at:
+          $ref: "#/components/schemas/Timestamp"
+
+    ComponentKind:
+      type: string
+      description: |
+        The fixed component palette from `canvas-types.ts` (spec §4.1). Curated and closed for the
+        MVP — custom icons are Phase 2 — so the server may validate against this enum. Each kind
+        carries a default geometry and size in the frontend; those are presentation concerns and
+        are not part of the wire format.
+      enum:
+        - client
+        - load-balancer
+        - api-gateway
+        - service
+        - database
+        - nosql
+        - cache
+        - queue
+        - llm
+        - cdn
+        - storage
+        - box
+
+    Endpoint:
+      description: |
+        One end of an arrow: either anchored to a shape (the arrow follows it when the shape
+        moves, spec §4.2) or pinned to a free canvas point.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [shapeId]
+          properties:
+            shapeId:
+              type: string
+              description: Id of a `ShapeNode` in the same document.
+        - type: object
+          additionalProperties: false
+          required: [x, y]
+          properties:
+            x:
+              type: number
+            y:
+              type: number
+
+    ShapeNode:
+      type: object
+      additionalProperties: false
+      required: [type, id, kind, label, x, y, w, h, authorId]
+      properties:
+        type:
+          const: shape
+        id:
+          type: string
+          examples: ["n_4k2mq7xr9b"]
+        kind:
+          $ref: "#/components/schemas/ComponentKind"
+        label:
+          type: string
+          description: Editable — the candidate renames a generic `service` to e.g. "Auth Service".
+        x:
+          type: number
+        y:
+          type: number
+        w:
+          type: number
+        h:
+          type: number
+        authorId:
+          type: string
+          description: The `Participant.id` that created the node.
+
+    ArrowNode:
+      type: object
+      additionalProperties: false
+      required: [type, id, from, to, label, dashed, bidirectional, authorId]
+      properties:
+        type:
+          const: arrow
+        id:
+          type: string
+        from:
+          $ref: "#/components/schemas/Endpoint"
+        to:
+          $ref: "#/components/schemas/Endpoint"
+        label:
+          type: string
+          description: e.g. "writes to", "async", "1:N". Empty string when unlabelled.
+        dashed:
+          type: boolean
+          description: Dashed conventionally means an async call.
+        bidirectional:
+          type: boolean
+        authorId:
+          type: string
+
+    StrokeNode:
+      type: object
+      additionalProperties: false
+      required: [type, id, points, color, width, authorId]
+      properties:
+        type:
+          const: stroke
+        id:
+          type: string
+        points:
+          type: array
+          description: |
+            Freehand path as an ordered list of `[x, y]` canvas-space pairs, appended to as the
+            pointer moves. A long stroke can hold hundreds of pairs — the dominant contributor to
+            document size.
+          items:
+            type: array
+            items:
+              type: number
+            minItems: 2
+            maxItems: 2
+          examples:
+            - [[120, 340], [122, 344], [127, 351]]
+        color:
+          type: string
+        width:
+          type: number
+        authorId:
+          type: string
+
+    TextNode:
+      type: object
+      additionalProperties: false
+      required: [type, id, x, y, text, authorId]
+      properties:
+        type:
+          const: text
+        id:
+          type: string
+        x:
+          type: number
+        y:
+          type: number
+        text:
+          type: string
+          description: Created empty and filled in place, so an empty string is valid.
+        authorId:
+          type: string
+
+    CanvasNode:
+      description: |
+        A single element on the board, discriminated by `type`. Shapes, arrows, strokes and text
+        share one flat list and one z-order (spec §4.3), so the array order is meaningful — later
+        entries render on top — and the server must preserve it.
+      oneOf:
+        - $ref: "#/components/schemas/ShapeNode"
+        - $ref: "#/components/schemas/ArrowNode"
+        - $ref: "#/components/schemas/StrokeNode"
+        - $ref: "#/components/schemas/TextNode"
+      discriminator:
+        propertyName: type
+        mapping:
+          shape: "#/components/schemas/ShapeNode"
+          arrow: "#/components/schemas/ArrowNode"
+          stroke: "#/components/schemas/StrokeNode"
+          text: "#/components/schemas/TextNode"
+
+    CanvasDoc:
+      type: object
+      additionalProperties: false
+      required: [nodes]
+      description: 'The whole board. An empty board is `{"nodes": []}`.'
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/CanvasNode"
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Stable machine-readable code.
+          examples: ["session_not_found", "canvas_locked", "forbidden_role"]
+        message:
+          type: string
+          description: Human-readable detail, safe to surface in the UI.
