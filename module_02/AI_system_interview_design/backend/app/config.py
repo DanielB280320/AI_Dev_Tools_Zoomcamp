@@ -77,6 +77,9 @@ class Settings:
         default_factory=lambda: _int("LOOPBOARD_PBKDF2_ITERATIONS", 600_000)
     )
     seed_on_startup: bool = field(default_factory=lambda: _bool("LOOPBOARD_SEED", True))
+    #: The frontend's static build (`dist/client`) to serve alongside the API.
+    #: Unset, the API serves no pages — the frontend runs on its own dev server.
+    static_dir: str = field(default_factory=lambda: _str("LOOPBOARD_STATIC_DIR", ""))
     cors_origins: list[str] = field(
         default_factory=lambda: _csv(
             "LOOPBOARD_CORS_ORIGINS",

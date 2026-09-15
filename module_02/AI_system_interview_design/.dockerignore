@@ -1,0 +1,13 @@
+.git
+
+frontend/node_modules
+frontend/dist
+frontend/.output
+frontend/.tanstack
+frontend/.nitro
+
+backend/.venv
+backend/**/__pycache__
+backend/.pytest_cache
+backend/.ruff_cache
+backend/loopboard.db*
