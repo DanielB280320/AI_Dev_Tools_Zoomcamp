@@ -1,5 +1,7 @@
 # Build and Ship a Full-Stack App with AI Coding Assistants
 
+## Module 2:
+
 ### 1. Start with a specification
 
     I want to build a system — I need your help with the specification. I want to build a system for interviewing: I'll send a link to candidates, and they'll need to do a system design interview.
@@ -91,3 +93,15 @@ Its suggested to create a Makefile to generate commands to run our app:
     Replace the in-memory store with a database. Use SQLite and SQLAlchemy.
     Use an environment variable to configure which DB the server should connect to.
     Make it database-agnostic - later we will add support for other databases (e.g. Postgres).
+
+## Module 3:
+
+### 1. Creating Dockerfile
+
+    Create a Dockerfile that builds the frontend with Node, then builds a Python image with the backend and the frontend static files.
+
+    Backend should serve the frontend.
+
+### 2. Building Dockerfile
+
+    So we have a Dockerfile I want to build this Dockerfile and I want to run it  so I want you to create a README file and put the instructions for running Dockerfile and building Dockerfile there in this README
