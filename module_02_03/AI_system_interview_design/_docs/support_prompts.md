@@ -44,7 +44,7 @@ To run a project you exported from Lovable:
     npm i
     npm run dev
 
-### Context Engineering: AGENTS.md/CLAUDE.md
+### 3. Context Engineering: AGENTS.md/CLAUDE.md
 
 Create any of these files based on the coding agent you are using and as starting point you can add the following instructions: 
 
@@ -155,9 +155,24 @@ When deploying the app to AWS we need to connect and give access to our coding a
 
     Your AWS Region is: us-east-2
     AWS experience: The new AWS experience
-    
-    # Sample 1
+
+    # Prompt 1:
     Now I want to deploy the application builded what options I have
 
-    # Sample 2
+    # Prompt 2:
     Deploy this application to AWS. Use AWS CloudFormation.
+
+    # Prompt 3:
+    Now give me the url
+
+    # Prompt 4:
+    Are there any options to use https without buying a Domain?
+
+    # Prompt 5:
+    # Limit the role permissions to deploy any change:
+    I want to make sure that this role has the least amount of permissions it needs to do the deployment right so it doesn't have anything extra that it doesn't need
+
+### 7. Clean up
+
+    aws cloudformation delete-stack --stack-name sdip
+    aws cloudformation wait stack-delete-complete --stack-name sdip
