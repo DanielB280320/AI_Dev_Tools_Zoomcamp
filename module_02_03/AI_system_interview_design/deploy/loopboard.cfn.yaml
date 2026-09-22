@@ -104,6 +104,17 @@ Parameters:
       the note on the Distribution resource before turning this on for a
       collaborative session: it proxies the SSE stream.
 
+  CloudFrontOriginPrefixListId:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^pl-[0-9a-f]+$
+    Description: >-
+      AWS's com.amazonaws.global.cloudfront.origin-facing managed prefix list
+      for this Region (pl-b6a144df in us-east-2). Given it, and with
+      EnableCloudFront true, the instance accepts HTTP only from CloudFront's
+      edge, so the distribution becomes the only way in and nobody can reach
+      the app over plain HTTP by its address. Empty leaves it open.
+
   SeedDemoData:
     Type: String
     Default: "false"
@@ -128,6 +139,9 @@ Parameters:
 
 Conditions:
   UseCloudFront: !Equals [!Ref EnableCloudFront, "true"]
+  LockOriginToCloudFront: !And
+    - !Equals [!Ref EnableCloudFront, "true"]
+    - !Not [!Equals [!Ref CloudFrontOriginPrefixListId, ""]]
   HasSsh: !Not [!Equals [!Ref SshAllowedCidr, ""]]
   HasDnsRecord: !And
     - !Not [!Equals [!Ref HostedZoneId, ""]]
@@ -139,18 +153,31 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          80 and 443 are open to the internet because this is a public web
-          server and Let's Encrypt's HTTP-01 challenge reaches port 80 from
-          addresses that cannot be enumerated. 443/udp carries HTTP/3.
+          Two shapes, one per front door. Served directly, the instance is a
+          public web server and must be open: Let's Encrypt's HTTP-01
+          challenge arrives on port 80 from addresses that cannot be
+          enumerated. Behind CloudFront, only the edge should reach it, or the
+          HTTPS the distribution provides is bypassable by using the address.
         must:
           - SSH stays closed unless SshAllowedCidr names a specific address.
+          - >-
+            Locking the origin to CloudFront and obtaining a Let's Encrypt
+            certificate on the instance are mutually exclusive: the challenge
+            cannot reach a port 80 that only CloudFront may open. Use the
+            distribution's certificate, or leave the origin open — not both.
     Properties:
       GroupDescription: !Sub "${AWS::StackName}: public HTTP/HTTPS, egress anywhere"
       VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP, and the ACME HTTP-01 challenge"}
-        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS}
-        - {IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "HTTP/3 (QUIC)"}
+      SecurityGroupIngress: !If
+        - LockOriginToCloudFront
+        # CloudFront's edge only. 443 is here so switching the origin to
+        # https-only later needs no security-group change; no UDP, because
+        # CloudFront does not speak HTTP/3 to an origin.
+        - - {IpProtocol: tcp, FromPort: 80, ToPort: 80, SourcePrefixListId: !Ref CloudFrontOriginPrefixListId, Description: "HTTP from CloudFront edge locations only"}
+          - {IpProtocol: tcp, FromPort: 443, ToPort: 443, SourcePrefixListId: !Ref CloudFrontOriginPrefixListId, Description: "HTTPS from CloudFront edge locations only"}
+        - - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP, and the ACME HTTP-01 challenge"}
+          - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS}
+          - {IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "HTTP/3 (QUIC)"}
       SecurityGroupEgress:
         - {IpProtocol: -1, CidrIp: 0.0.0.0/0, Description: "Package, image and ACME traffic"}
       Tags:
@@ -404,6 +431,13 @@ Outputs:
     Condition: UseCloudFront
     Description: HTTPS address served by CloudFront, with no domain of your own.
     Value: !Sub "https://${Distribution.DomainName}"
+
+  OriginExposure:
+    Description: Whether the instance is reachable directly, or only through CloudFront.
+    Value: !If
+      - LockOriginToCloudFront
+      - !Sub "Locked: only CloudFront edges may reach ${ElasticIp} on 80/443."
+      - !Sub "Open: http://${ElasticIp} is reachable directly and bypasses any CDN."
 
   ShellCommand:
     Description: A shell on the instance without an open SSH port.
