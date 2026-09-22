@@ -1,0 +1,289 @@
+# CI/CD for Loopboard (module_02_03/AI_system_interview_design).
+#
+#   backend-tests ─┐
+#                  ├─▶ integration-e2e ─▶ deploy ─▶ verify
+#   frontend-tests ┘                     (main only)
+#
+# The two unit-test jobs run in parallel. The compose stack is built once and
+# both the integration check (the frontend's API client driven against the
+# real server) and the Playwright suite run against it. A push to main then
+# redeploys the tested commit onto the EC2 instance from deploy/loopboard.cfn.yaml
+# through SSM, using a role assumed with GitHub's OIDC token, and the last job
+# fails the run unless the deployed site's /health answers.
+#
+# One-time setup, in this order:
+#   1. Deploy deploy/github-oidc.cfn.yaml (see deploy/README.md, "CI/CD").
+#   2. Repository Settings > Secrets and variables > Actions > Variables:
+#      AWS_DEPLOY_ROLE_ARN = that stack's DeployRoleArn output.
+# Until the variable exists the deploy and verify jobs are skipped, not failed.
+
+name: loopboard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "module_02_03/AI_system_interview_design/**"
+      - ".github/workflows/loopboard.yml"
+  pull_request:
+    paths:
+      - "module_02_03/AI_system_interview_design/**"
+      - ".github/workflows/loopboard.yml"
+  workflow_dispatch:
+
+# A newer push to the same PR or branch makes the older run's result moot. The
+# deploy job has its own group below, which never cancels a deploy midway.
+concurrency:
+  group: loopboard-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  APP_DIR: module_02_03/AI_system_interview_design
+  AWS_REGION: us-east-2
+  APP_STACK: loopboard
+
+defaults:
+  run:
+    working-directory: module_02_03/AI_system_interview_design
+
+jobs:
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.APP_DIR }}/backend/uv.lock
+
+      - name: Install dependencies
+        working-directory: ${{ env.APP_DIR }}/backend
+        run: uv sync --locked
+
+      - name: pytest
+        working-directory: ${{ env.APP_DIR }}/backend
+        run: uv run pytest -q
+
+  frontend-tests:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ env.APP_DIR }}/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.APP_DIR }}/frontend
+        run: npm ci
+
+      - name: Type check
+        working-directory: ${{ env.APP_DIR }}/frontend
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: ${{ env.APP_DIR }}/frontend
+        run: npm test
+
+  integration-e2e:
+    name: Integration and end-to-end tests
+    needs: [backend-tests, frontend-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE: docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            ${{ env.APP_DIR }}/frontend/package-lock.json
+            ${{ env.APP_DIR }}/e2e/package-lock.json
+
+      # The smoke script loads the frontend's TypeScript sources through jiti,
+      # and the Playwright container runs the suite from the mounted
+      # e2e/node_modules, so both need installing on the host.
+      - name: Install dependencies
+        run: |
+          npm ci --prefix frontend
+          npm ci --prefix e2e
+
+      - name: Build and start the stack
+        run: $COMPOSE up --build --detach --wait --wait-timeout 300 app
+
+      - name: Integration tests (frontend API client against the API)
+        run: node frontend/scripts/smoke-api.mjs
+
+      # E2E_USER: the container writes test-results/ into the bind-mounted e2e/
+      # directory, so it runs as the runner's user (1001, not the 1000 default).
+      - name: End-to-end tests (Playwright)
+        run: E2E_USER="$(id -u):$(id -g)" $COMPOSE run --rm -e CI=true e2e npx playwright test
+
+      - name: Container logs
+        if: failure()
+        run: $COMPOSE logs --no-color --timestamps
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            ${{ env.APP_DIR }}/e2e/playwright-report
+            ${{ env.APP_DIR }}/e2e/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Stop the stack
+        if: always()
+        run: $COMPOSE down --volumes
+
+  deploy:
+    name: Deploy to AWS
+    needs: integration-e2e
+    if: >-
+      github.ref == 'refs/heads/main'
+      && github.event_name != 'pull_request'
+      && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # The OIDC role trusts tokens from this environment only (see
+    # deploy/github-oidc.cfn.yaml), and deploys queue rather than overlap.
+    environment:
+      name: production
+      url: ${{ steps.stack.outputs.site_url }}
+    concurrency:
+      group: loopboard-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      site_url: ${{ steps.stack.outputs.site_url }}
+    # Nothing is checked out here; the instance fetches the commit itself.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: loopboard-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Find the instance and the public URL
+        id: stack
+        run: |
+          instance_id=$(aws cloudformation describe-stack-resource \
+            --stack-name "$APP_STACK" --logical-resource-id Instance \
+            --query StackResourceDetail.PhysicalResourceId --output text)
+          # The CloudFront URL when the stack has one (HTTPS, and the only way
+          # in when the origin is locked to CloudFront), the site URL otherwise.
+          site_url=$(aws cloudformation describe-stacks --stack-name "$APP_STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue | [0]" --output text)
+          if [[ -z $site_url || $site_url == None ]]; then
+            site_url=$(aws cloudformation describe-stacks --stack-name "$APP_STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='SiteUrl'].OutputValue | [0]" --output text)
+          fi
+          echo "instance_id=$instance_id" >>"$GITHUB_OUTPUT"
+          echo "site_url=$site_url" >>"$GITHUB_OUTPUT"
+          echo "Deploying $GITHUB_SHA to $instance_id, served at $site_url"
+
+      # Checks out exactly the commit this run tested, rather than whatever
+      # main is by the time the command lands, then runs the same idempotent
+      # bootstrap.sh a manual redeploy does. `checkout -B main` keeps the
+      # instance on a branch, so the README's manual `git pull` still works.
+      - name: Redeploy the tested commit on the instance
+        id: send
+        env:
+          INSTANCE_ID: ${{ steps.stack.outputs.instance_id }}
+        run: |
+          params=$(jq -n --arg sha "$GITHUB_SHA" '{
+            executionTimeout: ["1800"],
+            commands: [
+              "set -eu",
+              "cd /opt/loopboard/repo",
+              "git fetch --depth 1 origin \($sha)",
+              "git checkout --force -B main \($sha)",
+              "/opt/loopboard/app/deploy/bootstrap.sh",
+              "echo deployed-commit=$(git rev-parse HEAD)"
+            ]
+          }')
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "loopboard deploy ${GITHUB_SHA::12} (run $GITHUB_RUN_ID)" \
+            --parameters "$params" \
+            --query Command.CommandId --output text)
+          echo "command_id=$command_id" >>"$GITHUB_OUTPUT"
+          echo "SSM command $command_id"
+
+      # `aws ssm wait command-executed` gives up after 100 seconds, and a
+      # rebuild takes several minutes, so this polls on its own.
+      - name: Wait for the deploy to finish
+        env:
+          INSTANCE_ID: ${{ steps.stack.outputs.instance_id }}
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+        run: |
+          deadline=$((SECONDS + 1800))
+          status=Pending
+          while (( SECONDS < deadline )); do
+            sleep 15
+            status=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null) || status=Pending
+            echo "$(date -u +%H:%M:%S) $status"
+            case $status in Pending|InProgress|Delayed) ;; *) break ;; esac
+          done
+
+          echo "::group::Instance output"
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text | tail -n 60
+          echo "::endgroup::"
+
+          if [[ $status != Success ]]; then
+            aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+              --query StandardErrorContent --output text | tail -n 60
+            echo "::error::Deploy command ended as $status"
+            exit 1
+          fi
+
+  verify:
+    name: Verify the deployment
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      # Through the public front door, not from the instance: this is the path
+      # a user takes, so it also catches a broken Caddy or CloudFront hop.
+      - name: Check /health
+        env:
+          SITE_URL: ${{ needs.deploy.outputs.site_url }}
+        run: |
+          url="${SITE_URL%/}/health"
+          for attempt in $(seq 1 20); do
+            if body=$(curl -fsS --max-time 10 "$url") \
+              && [[ $(jq -r .status <<<"$body") == ok ]]; then
+              echo "$url -> $body"
+              exit 0
+            fi
+            echo "attempt $attempt: $url not healthy yet"
+            sleep 15
+          done
+          echo "::error::$url did not report {\"status\": \"ok\"} within 5 minutes"
+          exit 1

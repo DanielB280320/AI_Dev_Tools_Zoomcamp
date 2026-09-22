@@ -93,6 +93,47 @@ the images and waits for the health checks. It is also how a setting changes —
 edit `/etc/loopboard/deploy.env` (the domain, the Let's Encrypt address, whether
 to seed demo data) and run it again.
 
+## CI/CD
+
+`.github/workflows/loopboard.yml`, at the repository root, runs on every push
+and pull request that touches this app:
+
+1. **Backend tests** (`pytest`) and **frontend tests** (type check and Vitest) run in
+   parallel.
+2. **Integration and e2e tests**: builds the compose stack, drives the frontend's
+   API client against it (`frontend/scripts/smoke-api.mjs`), then runs the
+   Playwright suite in its container.
+3. **Deploy** runs on `main` only. It assumes an IAM role through GitHub's OIDC
+   token, then uses SSM Run Command on the instance to check out the commit the
+   run tested and run `bootstrap.sh`, which is the same redeploy as the manual one
+   above.
+4. **Verify** requests `/health` through the public URL (CloudFront when the stack
+   has it) and fails the run unless it reports `"status": "ok"`.
+
+Steps 3 and 4 are skipped until the role exists. To set it up:
+
+```bash
+aws cloudformation deploy \
+  --stack-name loopboard-github-oidc \
+  --template-file deploy/github-oidc.cfn.yaml \
+  --capabilities CAPABILITY_IAM
+
+aws cloudformation describe-stacks --stack-name loopboard-github-oidc \
+  --query "Stacks[0].Outputs[?OutputKey=='DeployRoleArn'].OutputValue" --output text
+```
+
+Then, on GitHub, go to Settings > Secrets and variables > Actions > Variables and
+set `AWS_DEPLOY_ROLE_ARN` to that ARN. The role trusts only jobs in this
+repository's `production` environment. It can read the `loopboard` stack and
+send commands to that stack's instance, and nothing else. If the account already
+registers `token.actions.githubusercontent.com`, pass
+`ExistingOidcProviderArn=...` so the stack reuses that provider.
+
+**On an AWS project (the new sign-up experience), the stack only deploys after
+you activate advanced features in AWS Settings.** The managed service control
+policies on both the Free and the Paid plan deny `iam:*Provider*`, which blocks
+creating the OIDC identity provider.
+
 **Back up** the database, which is the only state worth keeping:
 
 ```bash
