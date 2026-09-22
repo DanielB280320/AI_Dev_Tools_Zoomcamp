@@ -125,6 +125,12 @@ docker run -d --name interview-canvas-db \
   postgres:16-alpine
 ```
 
+Outside Docker the host is always `localhost` — a container name like
+`interview-canvas-db` is a Docker-network name and does not resolve from your
+machine. An unreachable or misconfigured database is reported at startup as a
+sentence naming the URL (password masked) and what to do about it, rather than a
+connection-pool traceback; the URL in use is logged on every start either way.
+
 The test suite is dialect-agnostic — nothing in it names SQLite — so `make test-pg` is the
 same 229 tests against Postgres. It empties the database on the way in and out, so point
 it only at a database whose contents are expendable.

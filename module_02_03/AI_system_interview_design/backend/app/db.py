@@ -26,6 +26,12 @@ The two differences that outlive configuration are here as well:
   on Postgres, so the one hot upsert in the app (cursor publishes, ~11 Hz per
   participant) is pushed into the database as `ON CONFLICT DO UPDATE`.
 
+A SQLite file cannot really be unreachable, and a Postgres URL is wrong more
+often than it is right the first time, so `check_connection()` turns the
+driver's failure into a sentence that says which URL was tried and what to do
+about it — the traceback underneath names about forty frames of connection pool
+and one useful line.
+
 The rest of the app sees only `session_scope()`.
 """
 
@@ -36,11 +42,13 @@ import threading
 import zlib
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -144,6 +152,81 @@ def init_db() -> None:
     """Create anything missing. Enough while the schema only ever grows; a
     column that changes shape is the point where this wants Alembic."""
     Base.metadata.create_all(get_engine())
+
+
+def safe_url(url: str | None = None) -> str:
+    """The configured URL with its password masked, safe to print or log."""
+    return make_url(url or settings.database_url).render_as_string(hide_password=True)
+
+
+def _in_container() -> bool:
+    """Whether this process is itself inside a container, which decides whether
+    a container name is a plausible host or a copy-paste mistake."""
+    return Path("/.dockerenv").exists()
+
+
+def _advice(url: str, detail: str) -> list[str]:
+    """What to suggest for a connection that did not open, most specific first."""
+    host = make_url(url).host or ""
+    lowered = detail.lower()
+    tips: list[str] = []
+
+    unresolved = "resolve host" in lowered or "translate host name" in lowered
+    if unresolved and not _in_container():
+        tips.append(
+            f"{host!r} does not resolve from this machine. A Docker container name only "
+            "resolves inside a Docker network — from the host, use `localhost` and the "
+            "port the container publishes."
+        )
+    elif unresolved:
+        tips.append(
+            f"{host!r} does not resolve. Inside a container, `localhost` is that "
+            "container: reach a database on the host via `host.docker.internal` (with "
+            "`--add-host=host.docker.internal:host-gateway`), or put both on one network "
+            "and use the container name."
+        )
+    elif "refused" in lowered or "timeout" in lowered or "timed out" in lowered:
+        tips.append(
+            "Nothing is accepting connections there. Start the database "
+            "(`make db-up` for the local container) and check the port."
+        )
+    elif "password" in lowered or "authentication" in lowered or "role" in lowered:
+        tips.append("The database rejected these credentials — check the user and password.")
+    elif "does not exist" in lowered:
+        tips.append("The server is up but has no such database — check the name in the URL.")
+
+    tips.append(
+        "Unset LOOPBOARD_DATABASE_URL to fall back to the default SQLite file, which "
+        "needs no server."
+    )
+    return tips
+
+
+def check_connection() -> None:
+    """Open one connection now, so a bad URL fails with an explanation.
+
+    Called at startup, before anything else touches the database. Without it the
+    first failure surfaces from wherever the pool happened to be used, as a
+    SQLAlchemy traceback whose single informative line is at the very top and
+    scrolled away.
+    """
+    try:
+        with get_engine().connect():
+            return
+    except OperationalError as error:
+        detail = str(error.orig or error).strip().splitlines()[0]
+
+    lines = [
+        "Cannot reach the database.",
+        "",
+        f"  URL:    {safe_url()}",
+        f"  Driver: {detail}",
+        "",
+    ]
+    lines += [f"  * {tip}" for tip in _advice(settings.database_url, detail)]
+    # `from None`: the driver's own message is quoted above, and the chain it
+    # would print is the pool internals that got us here, not the cause.
+    raise RuntimeError("\n".join(lines)) from None
 
 
 #: A constant for `pg_advisory_lock`, which keys on a 64-bit integer rather

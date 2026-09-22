@@ -90,6 +90,12 @@ docker run -d --name loopboard -p 8000:8000 --network loopboard-net \
   loopboard
 ```
 
+> **The host in the URL depends on where the server runs.** A container name
+> (`interview-canvas-db`) resolves *only* inside a Docker network — it is not a
+> hostname your machine knows. Running the server outside Docker, with `make dev`
+> or `make api-pg`, the URL is `…@localhost:5432/…`. Getting this wrong is the one
+> failure the server explains on startup rather than leaving to a traceback.
+
 The tables are created and the demo data seeded on first start, exactly as with
 SQLite. `backend/README.md` covers the rest — connection pooling, what changes
 between the two databases, and `make db-up` / `make api-pg` / `make test-pg` for

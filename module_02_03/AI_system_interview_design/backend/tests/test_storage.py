@@ -17,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateTable
 
 from app.config import Settings, normalize_database_url, settings
-from app.db import dispose_engine, engine_options
+from app.db import check_connection, dispose_engine, engine_options, safe_url
 from app.main import app
 from app.models import ArrowNode, PointEndpoint, ShapeEndpoint, ShapeNode, StrokeNode, TextNode
 from app.store import store
@@ -164,6 +164,70 @@ class TestPostgresUrls:
         monkeypatch.setenv("LOOPBOARD_DATABASE_URL", "postgres://sdip:sdip@localhost/sdip")
 
         assert Settings().database_url == "postgresql+psycopg://sdip:sdip@localhost/sdip"
+
+
+class TestUnreachableDatabase:
+    """A wrong URL is the normal first experience of a new database, so the
+    failure has to say which URL was tried and what to do — not forty frames of
+    connection pool with one useful line scrolled off the top.
+    """
+
+    @staticmethod
+    def _failure(url: str, monkeypatch: pytest.MonkeyPatch) -> str:
+        monkeypatch.setattr(settings, "database_url", normalize_database_url(url))
+        dispose_engine()
+        with pytest.raises(RuntimeError) as raised:
+            check_connection()
+        dispose_engine()
+        return str(raised.value)
+
+    def test_a_container_name_says_to_use_localhost(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The trap this came from: a container name resolves inside a Docker
+        network and nowhere else, and the URL is copied out of a `docker run`."""
+        message = self._failure("postgresql://sdip:sdip@no-such-container:5432/sdip", monkeypatch)
+
+        assert "Cannot reach the database" in message
+        assert "no-such-container" in message
+        assert "localhost" in message
+        assert "Docker" in message
+
+    def test_a_dead_port_says_to_start_the_database(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        message = self._failure("postgresql://sdip:sdip@127.0.0.1:5999/sdip", monkeypatch)
+
+        assert "make db-up" in message
+
+    def test_every_failure_offers_the_sqlite_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        message = self._failure("postgresql://sdip:sdip@127.0.0.1:5999/sdip", monkeypatch)
+
+        assert "Unset LOOPBOARD_DATABASE_URL" in message
+
+    def test_the_password_is_never_printed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The message is going into a terminal, a log aggregator and probably
+        a bug report."""
+        message = self._failure("postgresql://sdip:hunter2@127.0.0.1:5999/sdip", monkeypatch)
+
+        assert "hunter2" not in message
+        assert "sdip:***@" in message
+
+    def test_a_reachable_database_raises_nothing(self, file_db: Path) -> None:
+        assert check_connection() is None
+
+
+class TestSafeUrl:
+    def test_the_password_is_masked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "database_url", "postgresql+psycopg://u:secret@h/db")
+
+        assert safe_url() == "postgresql+psycopg://u:***@h/db"
+
+    def test_a_sqlite_path_survives_intact(self) -> None:
+        """Nothing to hide, and the path is the useful part."""
+        assert safe_url("sqlite:///loopboard.db") == "sqlite:///loopboard.db"
 
 
 class TestPortability:

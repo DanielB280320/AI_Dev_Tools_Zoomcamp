@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,7 +13,7 @@ from fastapi.responses import FileResponse
 
 from . import __version__, routers
 from .config import settings
-from .db import bootstrap_lock, init_db
+from .db import bootstrap_lock, check_connection, init_db, safe_url
 from .errors import ApiError, register_error_handlers
 from .seed import seed
 from .store import store
@@ -41,7 +42,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     Under `bootstrap_lock`, because on a shared database (Postgres) this is not
     the only process starting: two workers that both find no tables, or both
     find no sessions, would otherwise both try to create and both try to seed.
+
+    `check_connection` goes first so an unreachable database is one readable
+    error rather than a pool traceback, and the URL is logged either way —
+    "which database am I actually talking to" is the first question asked of a
+    server that is up but not showing the data someone expected.
     """
+    check_connection()
+    logging.getLogger("uvicorn.error").info("Database: %s", safe_url())
     with bootstrap_lock():
         init_db()
         if settings.seed_on_startup and store.session_count() == 0:
