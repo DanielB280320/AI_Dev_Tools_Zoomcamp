@@ -166,6 +166,21 @@ docker run -d --name loopboard -p 8000:8000 -v loopboard-data:/data \
 
 See `backend/app/config.py` for the rest.
 
+## Deploying to AWS
+
+`deploy/` holds a CloudFormation template that puts this stack on one EC2
+instance with Caddy terminating TLS in front of it:
+
+```bash
+aws cloudformation deploy --stack-name loopboard \
+  --template-file deploy/loopboard.cfn.yaml --capabilities CAPABILITY_IAM \
+  --parameter-overrides VpcId=vpc-... SubnetId=subnet-... DomainName=example.com
+```
+
+One instance, deliberately — the SSE broker is per-process, so a second one
+would serve clients that never hear about the first one's edits. `deploy/README.md`
+covers that, the DNS step, redeploying and the running cost.
+
 ## Local development
 
 Without Docker, the `Makefile` runs the API and the frontend dev server

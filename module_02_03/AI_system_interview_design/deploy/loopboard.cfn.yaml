@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Loopboard on one EC2 instance: the repository's docker-compose stack (Postgres
+  and the app image) behind Caddy, which terminates TLS with an automatically
+  renewed Let's Encrypt certificate. One instance on purpose — the app's SSE
+  broker is per-process, so a second one would serve clients that never hear
+  about the first one's edits.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    why: >-
+      The deployable form of a stack that is already tested as docker-compose
+      (`make e2e`), so the thing deployed stays the thing tested. The instance
+      builds the images from the public repository at boot, which keeps the
+      template self-contained: no registry, no build pipeline, no artifact to
+      upload before a deploy.
+    must:
+      - >-
+        Exactly one app process. `backend/app/events.py` keeps its SSE
+        subscribers in a process-local dict, so horizontal scaling silently
+        breaks live collaboration until that fan-out moves to Postgres
+        LISTEN/NOTIFY or Redis.
+      - >-
+        The database password is generated on the instance, never passed as a
+        stack parameter — parameter values are readable through the
+        CloudFormation API for as long as the stack exists.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: Network}
+        Parameters: [VpcId, SubnetId]
+      - Label: {default: Instance}
+        Parameters: [InstanceType, LatestAmiId, SshAllowedCidr]
+      - Label: {default: Site}
+        Parameters: [DomainName, LetsEncryptEmail, HostedZoneId, SeedDemoData]
+      - Label: {default: Source}
+        Parameters: [RepoUrl, RepoBranch, AppPath]
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the instance. The default VPC is the usual answer.
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A public subnet in that VPC — one whose route table has an internet
+      gateway, since the instance both serves the public and pulls its own
+      images at boot.
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium, t3.large, t4g.small, t4g.medium]
+    Description: >-
+      t3.small (2 GiB) is enough; the bootstrap adds swap so the frontend build
+      does not run out of memory. Pick a t4g.* only with an arm64 AMI.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: >-
+      Resolved from the SSM public parameter, so a fresh deployment gets a
+      current Amazon Linux 2023 image rather than a hardcoded stale one.
+
+  SshAllowedCidr:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    Description: >-
+      CIDR allowed to reach port 22, e.g. 203.0.113.4/32. Empty (the default)
+      opens no SSH at all — the instance profile below allows Session Manager,
+      which needs no open port and no key pair.
+
+  DomainName:
+    Type: String
+    Default: ""
+    Description: >-
+      The name the site is served as, e.g. loopboard.example.com. Caddy obtains
+      a certificate for it once its DNS record points at this stack's Elastic
+      IP. Empty serves plain HTTP on the IP.
+
+  LetsEncryptEmail:
+    Type: String
+    Default: ""
+    Description: Where Let's Encrypt sends certificate-expiry warnings. Optional.
+
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional Route 53 hosted zone holding DomainName; given both, the stack
+      creates the A record itself. Leave empty when DNS lives elsewhere.
+
+  SeedDemoData:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Whether to seed the demo interviewers, who share one published password.
+      False on a public address; POST /auth/register makes a real account.
+
+  RepoUrl:
+    Type: String
+    Default: https://github.com/DanielB280320/AI_Dev_Tools_Zoomcamp.git
+    Description: Public repository the instance clones at boot.
+
+  RepoBranch:
+    Type: String
+    Default: main
+
+  AppPath:
+    Type: String
+    Default: module_02_03/AI_system_interview_design
+    Description: Path to the app within that repository.
+
+Conditions:
+  HasSsh: !Not [!Equals [!Ref SshAllowedCidr, ""]]
+  HasDnsRecord: !And
+    - !Not [!Equals [!Ref HostedZoneId, ""]]
+    - !Not [!Equals [!Ref DomainName, ""]]
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          80 and 443 are open to the internet because this is a public web
+          server and Let's Encrypt's HTTP-01 challenge reaches port 80 from
+          addresses that cannot be enumerated. 443/udp carries HTTP/3.
+        must:
+          - SSH stays closed unless SshAllowedCidr names a specific address.
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName}: public HTTP/HTTPS, egress anywhere"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP, and the ACME HTTP-01 challenge"}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS}
+        - {IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "HTTP/3 (QUIC)"}
+      SecurityGroupEgress:
+        - {IpProtocol: -1, CidrIp: 0.0.0.0/0, Description: "Package, image and ACME traffic"}
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-sg"}
+
+  SshIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasSsh
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref SshAllowedCidr
+      Description: SSH from the operator's address
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Session Manager only. The instance calls no AWS API of its own — it
+          clones from a public repository and pulls public images — so this
+          role exists to give shell access without an open SSH port.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-role"}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          A DNS record has to point somewhere stable. An instance's ordinary
+          public IP changes on stop/start, which would invalidate both the
+          record and the certificate that depends on it resolving.
+    Properties:
+      Domain: vpc
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-eip"}
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          One instance running docker-compose, which is the same stack the e2e
+          suite drives locally. UserData clones the repository and hands off to
+          deploy/bootstrap.sh, so redeploying is a git pull and a re-run rather
+          than a stack update.
+        must:
+          - IMDSv2 only, and the root volume encrypted.
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref SecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}"}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Everything below is logged where a failed stack is explained from.
+          exec > >(tee /var/log/loopboard-bootstrap.log) 2>&1
+          set -x
+
+          WAIT_HANDLE='${BootstrapWaitHandle}'
+
+          # The stack's parameters, as the file bootstrap.sh reads. A quoted
+          # heredoc keeps the shell out of it; CloudFormation has already
+          # substituted the values.
+          install -d -m 700 /etc/loopboard
+          cat > /etc/loopboard/deploy.env <<'EOF_ENV'
+          DOMAIN_NAME=${DomainName}
+          LETSENCRYPT_EMAIL=${LetsEncryptEmail}
+          SEED_DEMO_DATA=${SeedDemoData}
+          EOF_ENV
+
+          dnf install -y git
+
+          # /opt/loopboard/app is the stable path the docs and the redeploy
+          # command use, wherever the app sits inside the repository.
+          install -d /opt/loopboard
+          if [ -d /opt/loopboard/repo/.git ]; then
+            git -C /opt/loopboard/repo pull --ff-only
+          else
+            git clone --depth 1 --branch ${RepoBranch} ${RepoUrl} /opt/loopboard/repo
+          fi
+          ln -sfn /opt/loopboard/repo/${AppPath} /opt/loopboard/app
+
+          STATUS=FAILURE
+          REASON='bootstrap failed - see /var/log/loopboard-bootstrap.log on the instance'
+          if /opt/loopboard/app/deploy/bootstrap.sh; then
+            STATUS=SUCCESS
+            REASON='loopboard is up'
+          fi
+
+          # The signal the stack is waiting on. Written to a file first, so the
+          # JSON needs no quoting gymnastics on the curl command line.
+          cat > /tmp/signal.json <<EOF_SIGNAL
+          {"Status":"${!STATUS}","Reason":"${!REASON}","UniqueId":"bootstrap","Data":"/var/log/loopboard-bootstrap.log"}
+          EOF_SIGNAL
+          curl -fsS -X PUT -H 'Content-Type:' --data-binary @/tmp/signal.json "${!WAIT_HANDLE}"
+
+  # A wait condition rather than a CreationPolicy on the instance: the signal
+  # comes from curl, so nothing depends on the aws-cfn-bootstrap package being
+  # present and current on the AMI.
+  BootstrapWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  BootstrapWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: Instance
+    Properties:
+      Handle: !Ref BootstrapWaitHandle
+      # Clone, two image builds (npm ci and a Vite build among them) and the
+      # health checks. Twenty minutes is generous for t3.small; a genuine
+      # failure signals immediately rather than waiting this out.
+      Timeout: "1500"
+      Count: 1
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDnsRecord
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      TTL: "300"
+      ResourceRecords: [!Ref ElasticIp]
+
+Outputs:
+  PublicIp:
+    Description: The Elastic IP — the address a DNS A record points at.
+    Value: !Ref ElasticIp
+
+  SiteUrl:
+    Description: Where the app answers.
+    Value: !If
+      - HasDnsRecord
+      - !Sub "https://${DomainName}"
+      - !Sub "http://${ElasticIp}"
+
+  DnsInstructions:
+    Description: What to do next when DNS is not managed in Route 53.
+    Value: !Sub "Point an A record for your domain at ${ElasticIp}; Caddy gets the certificate within a minute of it resolving."
+
+  ShellCommand:
+    Description: A shell on the instance without an open SSH port.
+    Value: !Sub "aws ssm start-session --target ${Instance} --region ${AWS::Region}"
+
+  RedeployCommand:
+    Description: Pull the latest commit and rebuild, run on the instance.
+    Value: "cd /opt/loopboard/repo && sudo git pull && sudo /opt/loopboard/app/deploy/bootstrap.sh"
+
+  LogCommand:
+    Description: Follow the application logs, run on the instance.
+    Value: "cd /opt/loopboard/app/deploy && sudo docker compose -f docker-compose.prod.yaml logs -f app"

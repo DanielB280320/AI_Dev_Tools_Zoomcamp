@@ -1,0 +1,27 @@
+# TLS termination and static-asset compression in front of the app container.
+#
+# `LOOPBOARD_SITE` is the site address: a domain name (`loopboard.example.com`)
+# makes Caddy obtain and renew a Let's Encrypt certificate on its own, and `:80`
+# — the fallback when no domain is configured — serves plain HTTP on every host.
+# Nothing else changes between the two.
+
+{
+	# Where Let's Encrypt sends expiry warnings. Empty is allowed; the ACME
+	# account is then anonymous, which costs only those warnings.
+	email {$LETSENCRYPT_EMAIL}
+}
+
+{$LOOPBOARD_SITE} {
+	# The canvas stream (`GET /sessions/{id}/events`) is Server-Sent Events: a
+	# response that never ends. A compressor buffers to fill a block, which
+	# holds events back for as long as it takes to fill one — so compress
+	# everything except that path.
+	@compressible not path /sessions/*/events
+	encode @compressible zstd gzip
+
+	reverse_proxy app:8000 {
+		# Forward each write as it arrives rather than on a buffer boundary,
+		# for the same reason.
+		flush_interval -1
+	}
+}

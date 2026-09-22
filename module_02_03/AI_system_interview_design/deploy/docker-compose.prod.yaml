@@ -1,0 +1,97 @@
+# The deployed stack: Postgres, the app image, and Caddy in front of it.
+#
+# The difference from the repository-root `docker-compose.yaml` is what a public
+# address demands: Postgres publishes no port, its password is generated per
+# deployment instead of being `sdip`, the demo data is off by default, and the
+# only thing listening on the host is Caddy, which terminates TLS.
+#
+#   cd /opt/loopboard/app/deploy
+#   docker compose -f docker-compose.prod.yaml up -d --build --wait
+#
+# Settings come from `.env` beside this file, written by `bootstrap.sh`.
+
+name: loopboard
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: loopboard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: loopboard
+    # No `ports`: the database is reachable from the compose network and
+    # nowhere else. `docker compose exec db psql -U loopboard` from the host.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loopboard -d loopboard -q"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build:
+      # The Dockerfile and the sources it copies are one level up.
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      LOOPBOARD_DATABASE_URL: postgresql://loopboard:${POSTGRES_PASSWORD}@db:5432/loopboard
+      # Off by default here: the seeded interviewers share one published
+      # password, which is fine on a laptop and not on a public address.
+      # `POST /auth/register` creates a real account instead.
+      LOOPBOARD_SEED: ${LOOPBOARD_SEED:-0}
+      # The app serves the frontend itself, so the browser's origin is this
+      # origin and CORS never comes into it. Set anyway, so a separately
+      # hosted frontend is a one-line change rather than a debugging session.
+      LOOPBOARD_CORS_ORIGINS: ${APP_ORIGIN:-}
+    # Published to the compose network only; Caddy owns the host's ports.
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://localhost:8000/health")
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+    # ONE replica, and the image's one uvicorn worker. The SSE broker in
+    # `backend/app/events.py` is a dict in the process that holds the open
+    # streams, so a second process serves clients that never hear about the
+    # first process's edits. Scaling out needs Postgres LISTEN/NOTIFY (or
+    # Redis) behind `EventBroker.publish` first.
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      # A domain name turns on automatic HTTPS; `:80` is the no-domain fallback.
+      LOOPBOARD_SITE: ${LOOPBOARD_SITE:-:80}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The issued certificates and the ACME account key. Without this volume
+      # every restart asks Let's Encrypt for a new certificate, which is how a
+      # deployment reaches the weekly rate limit.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
