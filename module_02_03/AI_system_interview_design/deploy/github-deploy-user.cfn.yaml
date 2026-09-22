@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  The IAM user GitHub Actions deploys Loopboard as. It can read the app stack's
+  outputs and run the redeploy on that stack's instance through Systems
+  Manager, and nothing else.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    why: >-
+      The CI/CD workflow (.github/workflows/loopboard.yml at the repository
+      root) deploys by sending `bootstrap.sh` to the running instance through
+      SSM Run Command, so it needs no EC2, IAM or CloudFormation write access.
+      An IAM user rather than a GitHub OIDC role because the project SCPs deny
+      `iam:*Provider*`, and advanced features, which lift that, are not
+      available on the Free plan. With the OIDC provider out of reach, a
+      long-lived key is the way in, so the permissions stay as narrow as a
+      role's would.
+    must:
+      - >-
+        No AWS::IAM::AccessKey here. Its secret would be readable through
+        GetAtt and the CloudFormation API for as long as the stack exists;
+        create the key with `aws iam create-access-key` and put it straight
+        into GitHub secrets.
+      - >-
+        Rotate the key by creating a second one, updating the GitHub secrets,
+        then deleting the first. A user holds at most two keys.
+
+Parameters:
+  AppStackName:
+    Type: String
+    Default: loopboard
+    Description: The stack deploy/loopboard.cfn.yaml created.
+
+  UserName:
+    Type: String
+    Default: loopboard-github-deploy
+    Description: Name of the IAM user, which `aws iam create-access-key` takes.
+
+Resources:
+  DeployUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Ref UserName
+      # No LoginProfile: this user has an access key and no console password.
+      Policies:
+        - PolicyName: redeploy-loopboard
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadAppStack
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResource
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*"
+
+              # CloudFormation tags every instance it creates with its stack's
+              # name, so this reaches that stack's instance and no other.
+              - Sid: RunOnAppInstance
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/aws:cloudformation:stack-name: !Ref AppStackName
+
+              - Sid: RunShellScriptDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript"
+
+              # Neither supports resource-level permissions.
+              - Sid: ReadCommandResults
+                Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-deploy"}
+
+Outputs:
+  DeployUserName:
+    Description: Create its access key with `aws iam create-access-key --user-name <this>`.
+    Value: !Ref DeployUser

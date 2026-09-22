@@ -8,14 +8,11 @@
 # both the integration check (the frontend's API client driven against the
 # real server) and the Playwright suite run against it. A push to main then
 # redeploys the tested commit onto the EC2 instance from deploy/loopboard.cfn.yaml
-# through SSM, using a role assumed with GitHub's OIDC token, and the last job
-# fails the run unless the deployed site's /health answers.
+# through SSM, as the narrowly scoped IAM user from deploy/github-deploy-user.cfn.yaml,
+# and the last job fails the run unless the deployed site's /health answers.
 #
-# One-time setup, in this order:
-#   1. Deploy deploy/github-oidc.cfn.yaml (see deploy/README.md, "CI/CD").
-#   2. Repository Settings > Secrets and variables > Actions > Variables:
-#      AWS_DEPLOY_ROLE_ARN = that stack's DeployRoleArn output.
-# Until the variable exists the deploy and verify jobs are skipped, not failed.
+# One-time setup (deploy/README.md, "CI/CD"): create that user's access key and
+# store it as the repository secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
 
 name: loopboard
 
@@ -154,23 +151,17 @@ jobs:
   deploy:
     name: Deploy to AWS
     needs: integration-e2e
-    if: >-
-      github.ref == 'refs/heads/main'
-      && github.event_name != 'pull_request'
-      && vars.AWS_DEPLOY_ROLE_ARN != ''
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    # The OIDC role trusts tokens from this environment only (see
-    # deploy/github-oidc.cfn.yaml), and deploys queue rather than overlap.
+    # Shows the live URL on the run and in the repository's Environments
+    # page. Deploys queue rather than overlap.
     environment:
       name: production
       url: ${{ steps.stack.outputs.site_url }}
     concurrency:
       group: loopboard-deploy
       cancel-in-progress: false
-    permissions:
-      contents: read
-      id-token: write
     outputs:
       site_url: ${{ steps.stack.outputs.site_url }}
     # Nothing is checked out here; the instance fetches the commit itself.
@@ -178,10 +169,19 @@ jobs:
       run:
         working-directory: .
     steps:
+      - name: Check the AWS credentials are configured
+        env:
+          KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        run: |
+          if [[ -z $KEY_ID ]]; then
+            echo "::error::Set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY repository secrets (deploy/README.md, \"CI/CD\")"
+            exit 1
+          fi
+
       - uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          role-session-name: loopboard-deploy-${{ github.run_id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Find the instance and the public URL

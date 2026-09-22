@@ -93,6 +93,13 @@ the images and waits for the health checks. It is also how a setting changes —
 edit `/etc/loopboard/deploy.env` (the domain, the Let's Encrypt address, whether
 to seed demo data) and run it again.
 
+**Back up** the database, which is the only state worth keeping:
+
+```bash
+sudo docker compose -f docker-compose.prod.yaml exec -T db \
+  pg_dump -U loopboard loopboard | gzip > loopboard-$(date +%F).sql.gz
+```
+
 ## CI/CD
 
 `.github/workflows/loopboard.yml`, at the repository root, runs on every push
@@ -103,43 +110,42 @@ and pull request that touches this app:
 2. **Integration and e2e tests**: builds the compose stack, drives the frontend's
    API client against it (`frontend/scripts/smoke-api.mjs`), then runs the
    Playwright suite in its container.
-3. **Deploy** runs on `main` only. It assumes an IAM role through GitHub's OIDC
-   token, then uses SSM Run Command on the instance to check out the commit the
-   run tested and run `bootstrap.sh`, which is the same redeploy as the manual one
-   above.
+3. **Deploy** runs on `main` only. It signs in as the IAM user from
+   `deploy/github-deploy-user.cfn.yaml`, then uses SSM Run Command on the
+   instance to check out the commit the run tested and run `bootstrap.sh`, which
+   is the same redeploy as the manual one above.
 4. **Verify** requests `/health` through the public URL (CloudFront when the stack
    has it) and fails the run unless it reports `"status": "ok"`.
 
-Steps 3 and 4 are skipped until the role exists. To set it up:
+The deploy job fails with a pointer here until the credentials exist. To set
+them up:
 
 ```bash
 aws cloudformation deploy \
-  --stack-name loopboard-github-oidc \
-  --template-file deploy/github-oidc.cfn.yaml \
-  --capabilities CAPABILITY_IAM
+  --stack-name loopboard-github-deploy \
+  --template-file deploy/github-deploy-user.cfn.yaml \
+  --capabilities CAPABILITY_NAMED_IAM
 
-aws cloudformation describe-stacks --stack-name loopboard-github-oidc \
-  --query "Stacks[0].Outputs[?OutputKey=='DeployRoleArn'].OutputValue" --output text
+# Straight from AWS into GitHub, so the secret never lands in a file or on screen.
+read -r key_id secret < <(aws iam create-access-key --user-name loopboard-github-deploy \
+  --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text)
+gh secret set AWS_ACCESS_KEY_ID --repo DanielB280320/AI_Dev_Tools_Zoomcamp --body "$key_id"
+gh secret set AWS_SECRET_ACCESS_KEY --repo DanielB280320/AI_Dev_Tools_Zoomcamp --body "$secret"
+unset key_id secret
 ```
 
-Then, on GitHub, go to Settings > Secrets and variables > Actions > Variables and
-set `AWS_DEPLOY_ROLE_ARN` to that ARN. The role trusts only jobs in this
-repository's `production` environment. It can read the `loopboard` stack and
-send commands to that stack's instance, and nothing else. If the account already
-registers `token.actions.githubusercontent.com`, pass
-`ExistingOidcProviderArn=...` so the stack reuses that provider.
+(Without `gh`, add the two values under Settings > Secrets and variables >
+Actions > New repository secret.)
 
-**On an AWS project (the new sign-up experience), the stack only deploys after
-you activate advanced features in AWS Settings.** The managed service control
-policies on both the Free and the Paid plan deny `iam:*Provider*`, which blocks
-creating the OIDC identity provider.
+The user has no console password. It can read the `loopboard` stack and send
+commands to that stack's instance, and nothing else. It is a long-lived key,
+though, so rotate it now and then: create a second key, update both secrets,
+then `aws iam delete-access-key` the old one.
 
-**Back up** the database, which is the only state worth keeping:
-
-```bash
-sudo docker compose -f docker-compose.prod.yaml exec -T db \
-  pg_dump -U loopboard loopboard | gzip > loopboard-$(date +%F).sql.gz
-```
+Why not a GitHub OIDC role, which would need no stored key? On an AWS project
+(the new sign-up experience) the managed service control policies deny
+`iam:*Provider*`, which blocks creating GitHub's OIDC identity provider, and on
+the Free plan that cannot be lifted.
 
 ## What is different from the local stack
 
