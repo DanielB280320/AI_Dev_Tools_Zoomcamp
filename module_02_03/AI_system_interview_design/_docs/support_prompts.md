@@ -121,8 +121,10 @@ To switch SQLite database to Postgres we can request the coding agent to create 
 
     Add Postgres support to the backend.
 
+    # When running the app from localhost we need to specify the db that will be use:
     export SDIP_DATABASE_URL=postgresql://sdip:sdip@localhost:5432/sdip
 
+    # Run frontend and backend at the same time:
     make dev
 
 ### 4. Docker Compose
@@ -144,6 +146,18 @@ To switch SQLite database to Postgres we can request the coding agent to create 
 
     Put the tests in the e2e/ folder in the repository root.
 
-### 6. Deploy to AWS
+### 6. App deploying
 
+When deploying the app to AWS we need to connect and give access to our coding agent to the cloud infrastructure:
+    
+    Set up Agent Toolkit for AWS by following instructions:
+    https://raw.githubusercontent.com/aws/agent-toolkit-for-aws/refs/heads/main/setup-instructions/setup.md
+
+    Your AWS Region is: us-east-2
+    AWS experience: The new AWS experience
+    
+    # Sample 1
+    Now I want to deploy the application builded what options I have
+
+    # Sample 2
     Deploy this application to AWS. Use AWS CloudFormation.
