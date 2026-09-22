@@ -104,4 +104,46 @@ Its suggested to create a Makefile to generate commands to run our app:
 
 ### 2. Building Dockerfile
 
-    So we have a Dockerfile I want to build this Dockerfile and I want to run it  so I want you to create a README file and put the instructions for running Dockerfile and building Dockerfile there in this README
+    So we have a Dockerfile I want to build this Dockerfile and I want to run it so I want you to create a README file and put the instructions for running Dockerfile and building Dockerfile there in this README
+
+### 3. Switch from SQLite to Postgres
+
+To switch SQLite database to Postgres we can request the coding agent to create one pg database or do it manually wtih the command:
+
+    docker run -d \
+    --name interview-canvas-db \
+    -e POSTGRES_USER=sdip \
+    -e POSTGRES_PASSWORD=sdip \
+    -e POSTGRES_DB=sdip \
+    -p 5432:5432 \
+    -v interview-canvas-pgdata:/var/lib/postgresql/data \
+    postgres:16-alpine
+
+    Add Postgres support to the backend.
+
+    export SDIP_DATABASE_URL=postgresql://sdip:sdip@localhost:5432/sdip
+
+    make dev
+
+### 4. Docker Compose
+
+    Create docker-compose.yaml with two services: Postgres and the app.
+
+### 5. Integration and end-to-end tests
+
+    Add an end-to-end test that runs against docker-compose.yaml.
+
+    Use Playwright to:
+
+    1. Log in as the interviewer (session 1).
+    2. Create an interview session.
+    3. Share the join link.
+    4. Join from a separate client as the candidate (session 2).
+    5. Change the canvas as the candidate (session 2).
+    6. Verify that the interviewer sees the change (session 1).
+
+    Put the tests in the e2e/ folder in the repository root.
+
+### 6. Deploy to AWS
+
+    Deploy this application to AWS. Use AWS CloudFormation.
