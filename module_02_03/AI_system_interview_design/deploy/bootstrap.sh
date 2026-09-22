@@ -89,6 +89,15 @@ fi
 seed=0
 [[ ${SEED_DEMO_DATA,,} == true ]] && seed=1
 
+# The Caddyfile imports this. A bare `email` directive is a syntax error, so
+# with no address configured the file holds a comment and nothing else.
+if [[ -n $LETSENCRYPT_EMAIL ]]; then
+	echo "email $LETSENCRYPT_EMAIL" >"$DEPLOY_DIR/caddy-acme.conf"
+else
+	echo "# no ACME contact address configured" >"$DEPLOY_DIR/caddy-acme.conf"
+fi
+chmod 644 "$DEPLOY_DIR/caddy-acme.conf"
+
 log "writing $DEPLOY_DIR/.env (site: $site, seed: $seed)"
 cat >"$DEPLOY_DIR/.env" <<ENV
 # Written by bootstrap.sh — edit deploy.env and re-run rather than this file.

@@ -81,6 +81,8 @@ services:
       - "443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Written by bootstrap.sh: the ACME contact address, or a comment.
+      - ./caddy-acme.conf:/etc/caddy/acme.conf:ro
       # The issued certificates and the ACME account key. Without this volume
       # every restart asks Let's Encrypt for a new certificate, which is how a
       # deployment reaches the weekly rate limit.
@@ -89,6 +91,16 @@ services:
     depends_on:
       app:
         condition: service_healthy
+    # Without this, `up --wait` only requires the container to be *running*,
+    # and Caddy refusing a bad config looks exactly like a healthy deployment
+    # until someone opens the site. The admin API answers whatever the site
+    # address is, and only once a config has actually loaded.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:2019/config/"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

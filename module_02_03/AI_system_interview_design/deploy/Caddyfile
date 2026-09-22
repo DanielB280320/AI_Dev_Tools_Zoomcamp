@@ -6,9 +6,12 @@
 # Nothing else changes between the two.
 
 {
-	# Where Let's Encrypt sends expiry warnings. Empty is allowed; the ACME
-	# account is then anonymous, which costs only those warnings.
-	email {$LETSENCRYPT_EMAIL}
+	# The ACME contact address, as `email you@example.com` — or as nothing at
+	# all, since a bare `email` is a syntax error Caddy refuses to start on.
+	# bootstrap.sh writes whichever of the two applies, because the Caddyfile
+	# has no conditionals and an unset environment variable expands to the
+	# broken form.
+	import /etc/caddy/acme.conf
 }
 
 {$LOOPBOARD_SITE} {
