@@ -3,6 +3,40 @@
 A collaborative whiteboard for system-design interviews. The backend is a
 FastAPI app (`backend/`), the frontend a Vite/React app (`frontend/`).
 
+## Running with Docker Compose
+
+`docker-compose.yaml` starts the two containers the app needs — Postgres and
+the app image — and wires them together, which is the shortest path from a
+clone to a running app:
+
+```bash
+docker compose up --build -d
+```
+
+Then open http://localhost:8000. The app waits for Postgres to report healthy,
+creates its tables and seeds the demo data on the first start.
+
+```bash
+docker compose logs -f app   # follow the server logs
+docker compose ps            # what is running
+docker compose down          # stop both; the database volume survives
+docker compose down -v       # stop both and wipe the data
+docker compose up --build -d # rebuild and recreate after a code change
+```
+
+The database is published on 5432 so `psql` and `make test-pg` can reach it.
+`make db-up` uses that port too, so if you already have that container running,
+start this one elsewhere: `PG_PORT=5433 docker compose up -d`. The app's own
+port is 8000 — a `make dev` server on the same port shadows the container's,
+so stop one before starting the other.
+
+The credentials are development defaults (`sdip` / `sdip` / `sdip`); change
+them in the compose file, in both the `db` environment and the app's
+`LOOPBOARD_DATABASE_URL`, before exposing the port to anyone else.
+
+The next section runs the same containers by hand, which is worth reading for
+what each piece does.
+
 ## Running with Docker
 
 The `Dockerfile` builds everything into one image: the frontend is built to

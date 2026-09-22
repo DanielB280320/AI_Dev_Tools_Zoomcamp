@@ -1,0 +1,60 @@
+# The whole app in two containers: Postgres, and the image the Dockerfile
+# builds (the API serving the built frontend).
+#
+#   docker compose up --build -d     # start both, building the app image
+#   docker compose logs -f app       # follow the server logs
+#   docker compose down              # stop them; the database volume survives
+#   docker compose down -v           # stop them and wipe the data
+#
+# Then open http://localhost:8000 (API docs at /docs).
+#
+# The credentials below are the same ones the Makefile's `db-up` uses, so a
+# `psql` command or a URL from the README works here unchanged. They are
+# development defaults — override POSTGRES_PASSWORD (and the password in the
+# app's URL) anywhere the port is reachable by anyone else.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sdip
+      POSTGRES_PASSWORD: sdip
+      POSTGRES_DB: sdip
+    # Published so `psql`, `make test-pg` and a server run outside Docker can
+    # reach the same database. The Makefile's `make db-up` container holds
+    # 5432 too, so `PG_PORT=5433 docker compose up -d` runs both at once;
+    # drop these two lines to keep this database inside the network.
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # The app fails its first queries against a Postgres that is still starting
+    # up, so `depends_on` below waits for this to pass rather than for the
+    # container to merely exist.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sdip -d sdip -q"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      # `db` is the service name, which is a hostname on the compose network —
+      # not one the host machine knows. Outside Docker the same URL reads
+      # `@localhost:5432`.
+      LOOPBOARD_DATABASE_URL: postgresql://sdip:sdip@db:5432/sdip
+      # Tables are created and the demo data seeded on the first start against
+      # an empty database. Set to 0 to skip the seeding.
+      LOOPBOARD_SEED: "1"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
