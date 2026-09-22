@@ -170,11 +170,15 @@ Resources:
       VpcId: !Ref VpcId
       SecurityGroupIngress: !If
         - LockOriginToCloudFront
-        # CloudFront's edge only. 443 is here so switching the origin to
-        # https-only later needs no security-group change; no UDP, because
-        # CloudFront does not speak HTTP/3 to an origin.
+        # CloudFront's edge only, and port 80 only, because the origin
+        # protocol policy is http-only.
+        #
+        # One rule, not two: a rule naming a prefix list costs that list's
+        # MaxEntries against the 60-rules-per-group quota rather than costing
+        # one, and this list is large enough that a second reference exceeds
+        # the quota outright. A 443 rule "for later" is what broke the first
+        # attempt at this, so later can add it — after raising the quota.
         - - {IpProtocol: tcp, FromPort: 80, ToPort: 80, SourcePrefixListId: !Ref CloudFrontOriginPrefixListId, Description: "HTTP from CloudFront edge locations only"}
-          - {IpProtocol: tcp, FromPort: 443, ToPort: 443, SourcePrefixListId: !Ref CloudFrontOriginPrefixListId, Description: "HTTPS from CloudFront edge locations only"}
         - - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP, and the ACME HTTP-01 challenge"}
           - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS}
           - {IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "HTTP/3 (QUIC)"}
