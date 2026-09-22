@@ -11,3 +11,6 @@ backend/**/__pycache__
 backend/.pytest_cache
 backend/.ruff_cache
 backend/loopboard.db*
+
+# The Playwright suite runs beside the image, never in it.
+e2e

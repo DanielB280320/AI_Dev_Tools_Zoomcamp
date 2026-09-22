@@ -11,6 +11,9 @@
 #
 # For Postgres instead: `make db-up` starts a local container, `make api-pg` and
 # `make test-pg` point the API and the suite at it, and `make db-down` stops it.
+#
+# `make up` runs the whole app in Docker (docker-compose.yaml), and `make e2e`
+# runs the Playwright suite in e2e/ against it.
 
 SHELL := bash
 .DEFAULT_GOAL := help
@@ -31,14 +34,20 @@ PG_PASSWORD ?= sdip
 PG_DB ?= sdip
 PG_PORT ?= 5432
 PG_URL ?= postgresql://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DB)
+
+# The end-to-end suite and the compose stack it drives.
+E2E := e2e
+COMPOSE := docker compose -f docker-compose.yaml
+COMPOSE_E2E := $(COMPOSE) -f docker-compose.e2e.yaml
 # `dev` prints the credentials banner once, then suppresses it in the sub-makes.
 CREDS ?= 1
 
 .PHONY: help install install-api install-web api web dev test smoke lint format creds docs health db-reset clean \
-	db-up db-down db-psql db-wait api-pg test-pg db-reset-pg
+	db-up db-down db-psql db-wait api-pg test-pg db-reset-pg \
+	up down logs e2e e2e-local install-e2e
 
 help: ## List the available targets
-	@grep -hE '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN { FS = ":.*## " } { printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2 }'
 
 install: install-api install-web ## Install both sides' dependencies
@@ -79,6 +88,32 @@ test-pg: db-wait ## Run the same tests against Postgres (empties PG_DB first)
 
 smoke: ## Drive the frontend's API client against a running backend
 	node $(FRONTEND)/scripts/smoke-api.mjs
+
+# --------------------------- compose + end to end ----------------------------
+
+up: ## Start the whole app in Docker (Postgres + the app image) on :8000
+	$(COMPOSE) up --build -d --wait
+
+down: ## Stop the compose stack (the database volume survives)
+	$(COMPOSE) down
+
+logs: ## Follow the app container's logs
+	$(COMPOSE) logs -f app
+
+install-e2e: ## Install the end-to-end suite's dependencies (npm)
+	cd $(E2E) && npm install
+
+# The container runs the suite from the mounted e2e/node_modules, so it has to
+# exist first; this installs it once, and again when the lockfile changes.
+$(E2E)/node_modules: $(E2E)/package-lock.json
+	cd $(E2E) && npm ci
+	@touch $@
+
+e2e: $(E2E)/node_modules ## Run the Playwright suite against the compose stack, in a container
+	$(COMPOSE_E2E) run --rm e2e npx playwright test $(ARGS)
+
+e2e-local: $(E2E)/node_modules ## Run the same suite from the host (needs Chromium's system libs)
+	cd $(E2E) && npx playwright test $(ARGS)
 
 lint: ## Lint both sides
 	cd $(BACKEND) && uvx ruff check app tests
@@ -146,3 +181,4 @@ db-reset-pg: db-wait ## Drop every table in Postgres, so the next start re-seeds
 clean: ## Delete Python caches and test artefacts
 	find $(BACKEND) -type d -name __pycache__ -prune -exec rm -rf {} +
 	rm -rf $(BACKEND)/.pytest_cache $(BACKEND)/.ruff_cache
+	rm -rf $(E2E)/test-results $(E2E)/playwright-report $(E2E)/blob-report

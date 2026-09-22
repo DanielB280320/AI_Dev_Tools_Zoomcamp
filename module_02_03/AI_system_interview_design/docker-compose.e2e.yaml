@@ -1,0 +1,44 @@
+# The Playwright suite in `e2e/`, run as a container beside the app.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml run --rm e2e
+#
+# (or `make e2e`, which is the same line). Compose starts Postgres and the app
+# first and waits for both to report healthy.
+#
+# This is the way to run the suite on a machine without Chromium's system
+# libraries — the official Playwright image has them. With them installed,
+# `cd e2e && npm test` runs the same suite on the host, against the same stack.
+
+services:
+  e2e:
+    # Must match the @playwright/test version in e2e/package.json: the image
+    # ships the browsers that version expects, and the mounted node_modules
+    # brings the runner itself.
+    image: mcr.microsoft.com/playwright:v1.63.0-noble
+    working_dir: /e2e
+    volumes:
+      - ./e2e:/e2e
+    # Share the app container's network namespace, which makes the app
+    # `http://localhost:8000` in here. That is not a convenience: the test
+    # reads back what "Copy join link" put on the clipboard, and the clipboard
+    # API exists only in a secure context — which plain http is, on localhost
+    # and nowhere else. Reaching the app as `http://app:8000` instead fails
+    # twice over: `.app` is in Chrome's HSTS preload list, so the URL is
+    # upgraded to https, and `navigator.clipboard` is undefined.
+    network_mode: "service:app"
+    environment:
+      # Set, so the config drives the tests against this already-running stack
+      # instead of running `docker compose` itself (there is no Docker in here).
+      E2E_BASE_URL: http://localhost:8000
+      # This runs as a bare uid with no passwd entry, so npm and the browsers
+      # need to be told where to write.
+      HOME: /tmp
+    # `e2e/` is a bind mount, so whoever runs in here owns the test-results/
+    # and playwright-report/ directories that appear on the host. The image's
+    # own pwuser is 1001, which is nobody on most hosts; 1000 is the first
+    # Linux user. Override for a different one: `E2E_USER=1001:1001 …`.
+    user: "${E2E_USER:-1000:1000}"
+    depends_on:
+      app:
+        condition: service_healthy
+    command: npx playwright test

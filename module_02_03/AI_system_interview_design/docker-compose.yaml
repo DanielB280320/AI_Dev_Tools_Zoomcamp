@@ -54,6 +54,19 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # `docker compose up --wait`, and anything that depends on this service
+    # being ready (the e2e runner in docker-compose.e2e.yaml), need a readiness
+    # signal. The image has no curl, so the probe is the Python already in it.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://localhost:8000/health")
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
     restart: unless-stopped
 
 volumes:

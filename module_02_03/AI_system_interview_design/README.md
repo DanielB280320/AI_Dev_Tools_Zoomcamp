@@ -34,6 +34,20 @@ The credentials are development defaults (`sdip` / `sdip` / `sdip`); change
 them in the compose file, in both the `db` environment and the app's
 `LOOPBOARD_DATABASE_URL`, before exposing the port to anyone else.
 
+### End-to-end tests
+
+`e2e/` holds a Playwright suite that drives this stack through two browsers —
+an interviewer creating a session and sharing the link, a candidate joining
+and editing the board, and the interviewer seeing the edit arrive live:
+
+```bash
+make e2e
+```
+
+It runs in the official Playwright container, so it needs nothing beyond
+Docker. `e2e/README.md` covers running it from the host, debugging a failure,
+and what each step checks.
+
 The next section runs the same containers by hand, which is worth reading for
 what each piece does.
 
