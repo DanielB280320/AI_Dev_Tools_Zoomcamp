@@ -16,7 +16,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.schema import CreateTable
 
-from app.config import settings
+from app.config import Settings, normalize_database_url, settings
 from app.db import dispose_engine, engine_options
 from app.main import app
 from app.models import ArrowNode, PointEndpoint, ShapeEndpoint, ShapeNode, StrokeNode, TextNode
@@ -105,12 +105,65 @@ class TestConfiguration:
         assert "poolclass" not in options
         assert options["connect_args"] == {"check_same_thread": False}
 
-    def test_a_server_database_gets_pre_ping_and_no_sqlite_flags(self) -> None:
+    def test_a_server_database_gets_a_pool_and_no_sqlite_flags(self) -> None:
         options = engine_options("postgresql+psycopg://user:pw@db.internal/loopboard")
 
-        assert options["pool_pre_ping"] is True
-        assert "connect_args" not in options
+        assert options["pool_pre_ping"] is True, "replace a connection closed underneath us"
+        assert options["pool_size"] == settings.db_pool_size
+        assert options["max_overflow"] == settings.db_max_overflow
+        assert options["pool_recycle"] == settings.db_pool_recycle_seconds
         assert "poolclass" not in options
+        assert "check_same_thread" not in options["connect_args"], "that flag is SQLite's"
+
+    def test_postgres_fails_fast_instead_of_hanging(self) -> None:
+        """Without a connect timeout, an unreachable server holds the request
+        open for however long the OS takes to give up."""
+        options = engine_options("postgresql+psycopg://user:pw@db.internal/loopboard")
+
+        assert options["connect_args"]["connect_timeout"] == settings.db_connect_timeout_seconds
+        assert options["connect_args"]["application_name"] == "loopboard"
+
+    def test_pool_recycle_can_be_turned_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """0 means "never recycle", which SQLAlchemy spells -1."""
+        monkeypatch.setattr(settings, "db_pool_recycle_seconds", 0)
+
+        assert engine_options("postgresql://user:pw@db.internal/loopboard")["pool_recycle"] == -1
+
+
+class TestPostgresUrls:
+    """The URL a person actually has is rarely the one SQLAlchemy wants."""
+
+    @pytest.mark.parametrize(
+        "given",
+        [
+            "postgresql://sdip:sdip@localhost:5432/sdip",  # the documentation spelling
+            "postgres://sdip:sdip@localhost:5432/sdip",  # what a hosted database hands out
+        ],
+    )
+    def test_a_driverless_url_gets_psycopg(self, given: str) -> None:
+        """SQLAlchemy's default for both is psycopg2, which is not installed."""
+        assert (
+            normalize_database_url(given) == "postgresql+psycopg://sdip:sdip@localhost:5432/sdip"
+        )
+
+    @pytest.mark.parametrize(
+        "given",
+        [
+            "postgresql+psycopg://user:pw@host/db",
+            "postgresql+asyncpg://user:pw@host/db",
+            "sqlite:///loopboard.db",
+            "sqlite://",
+            "mysql+pymysql://user:pw@host/db",
+        ],
+    )
+    def test_a_url_that_names_its_driver_is_left_alone(self, given: str) -> None:
+        assert normalize_database_url(given) == given
+
+    def test_the_setting_normalises_on_the_way_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """So `LOOPBOARD_DATABASE_URL=postgres://…` reaches the engine usable."""
+        monkeypatch.setenv("LOOPBOARD_DATABASE_URL", "postgres://sdip:sdip@localhost/sdip")
+
+        assert Settings().database_url == "postgresql+psycopg://sdip:sdip@localhost/sdip"
 
 
 class TestPortability:

@@ -4,6 +4,19 @@
 #   docker run -p 8000:8000 -v loopboard-data:/data loopboard
 #
 # Then open http://localhost:8000 (API docs at /docs).
+#
+# That stores data in a SQLite file on the volume, which is the zero-setup
+# default. Against Postgres running on the host instead — no volume needed,
+# the data is the database's problem:
+#
+#   docker run -p 8000:8000 \
+#     --add-host=host.docker.internal:host-gateway \
+#     -e LOOPBOARD_DATABASE_URL=postgresql://sdip:sdip@host.docker.internal:5432/sdip \
+#     loopboard
+#
+# (`localhost` inside the container is the container, hence `host-gateway`. A
+# Postgres on a user-defined docker network is reachable by container name, and
+# in production it is just a hostname.)
 
 # ---------------------------------------------------------------- frontend ---
 FROM node:22-slim AS frontend

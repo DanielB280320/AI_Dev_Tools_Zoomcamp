@@ -5,10 +5,14 @@ is exercised by every run, and runs against a `TestClient` entered as a context
 manager — the lifespan has to run for the SSE broker to share one event loop
 across requests.
 
-The database is a throwaway SQLite file, pointed at through the same setting a
-deployment would use to reach Postgres. The `row` helpers below reach past the
-store into the tables, for the handful of tests that have to age a timestamp or
-count what a delete left behind.
+The database is a throwaway SQLite file by default, pointed at through the same
+setting a deployment would use to reach Postgres. Set
+`LOOPBOARD_TEST_DATABASE_URL` and the whole suite runs against that database
+instead — `make test-pg` points it at the local Postgres container — which is
+how the Postgres path is covered, since nothing in the tests names a dialect.
+
+The `row` helpers below reach past the store into the tables, for the handful
+of tests that have to age a timestamp or count what a delete left behind.
 """
 
 from __future__ import annotations
@@ -16,7 +20,6 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 
 # Must be set before `app.config` is imported: the settings are read once.
 os.environ.setdefault("LOOPBOARD_PBKDF2_ITERATIONS", "1000")  # keep the suite fast
@@ -26,7 +29,7 @@ import pytest
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
-from app.config import settings
+from app.config import normalize_database_url, settings
 from app.db import dispose_engine, session_scope
 from app.events import broker
 from app.main import app
@@ -49,18 +52,35 @@ def client() -> TestClient:
     broker.reset()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def test_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
-    """Run the whole suite against one throwaway SQLite file.
+#: Run the suite against a real server database instead of the SQLite file.
+#: Every table is emptied on the way in and out, so it must be a database whose
+#: contents are expendable — `make db-up` starts exactly that.
+TEST_DATABASE_URL = os.environ.get("LOOPBOARD_TEST_DATABASE_URL", "").strip()
 
-    A file rather than `sqlite://`: an in-memory database only exists inside the
-    connection that opened it, so every thread would have to share one — and the
+
+@pytest.fixture(scope="session", autouse=True)
+def test_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Point the store at the database this run uses, for the whole run.
+
+    `LOOPBOARD_TEST_DATABASE_URL` wins, so the same suite can be run against
+    Postgres. Otherwise a throwaway SQLite file — a file rather than
+    `sqlite://`, because an in-memory database only exists inside the
+    connection that opened it, so every thread would have to share one, and the
     SSE tests run a second server on a thread of its own.
     """
+    if TEST_DATABASE_URL:
+        settings.database_url = normalize_database_url(TEST_DATABASE_URL)
+        dispose_engine()
+        store.reset()  # a server database is reused between runs; start empty
+        yield
+        store.reset()
+        dispose_engine()
+        return
+
     path = tmp_path_factory.mktemp("loopboard") / "test.db"
     settings.database_url = f"sqlite:///{path.as_posix()}"
     dispose_engine()
-    yield path
+    yield
     dispose_engine()
 
 

@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 
 from . import __version__, routers
 from .config import settings
-from .db import init_db
+from .db import bootstrap_lock, init_db
 from .errors import ApiError, register_error_handlers
 from .seed import seed
 from .store import store
@@ -36,10 +36,16 @@ Sign in as `alex@loopboard.dev` / `loopboard-demo` to see the seeded boards.
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Create anything missing in the database, then seed it if it is empty."""
-    init_db()
-    if settings.seed_on_startup and store.session_count() == 0:
-        seed(store)
+    """Create anything missing in the database, then seed it if it is empty.
+
+    Under `bootstrap_lock`, because on a shared database (Postgres) this is not
+    the only process starting: two workers that both find no tables, or both
+    find no sessions, would otherwise both try to create and both try to seed.
+    """
+    with bootstrap_lock():
+        init_db()
+        if settings.seed_on_startup and store.session_count() == 0:
+            seed(store)
     yield
 
 

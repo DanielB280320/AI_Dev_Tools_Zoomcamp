@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session as DbSession
 
 from .config import settings
-from .db import init_db, session_scope
+from .db import init_db, serialized_write, session_scope, upsert
 from .models import CanvasNode, CursorState, Role, SessionStatus
 from .tables import (
     Account,
@@ -284,7 +284,10 @@ class Store:
     # ----------------------------- participants -----------------------------
 
     def join(self, session_id: str, name: str, role: Role) -> tuple[ParticipantRecord, str]:
-        with session_scope() as db:
+        # Reads the roster, then writes a row based on what it counted — see
+        # `serialized_write` for why that needs help on both dialects.
+        with serialized_write(), session_scope() as db:
+            self._lock_session(db, session_id)
             joined = self._roster_size(db, session_id)
             participant = ParticipantRecord(
                 id=new_participant_id(),
@@ -353,6 +356,24 @@ class Store:
         )
 
     @staticmethod
+    def _lock_session(db: DbSession, session_id: str) -> None:
+        """Make concurrent joins of one session queue behind each other.
+
+        A join counts the roster to pick the next colour and the next `seq`,
+        then inserts — so two people accepting the link at the same moment can
+        both count the same roster and land on the same colour and the same
+        position. Locking the session row first makes the second join wait for
+        the first to commit, and it does so across processes, which is what a
+        multi-worker deployment needs.
+
+        `FOR UPDATE` is emitted on Postgres and silently dropped on SQLite,
+        which has no such grammar; `serialized_write` is what covers SQLite.
+        """
+        db.execute(
+            sa.select(SessionRecord.id).where(SessionRecord.id == session_id).with_for_update()
+        )
+
+    @staticmethod
     def _roster_size(db: DbSession, session_id: str) -> int:
         count = db.scalar(
             sa.select(sa.func.count())
@@ -389,14 +410,22 @@ class Store:
 
     def put_cursor(self, session_id: str, cursor: CursorState) -> None:
         """Upsert by participant: a cursor keeps the place it first took in the
-        list, so a moving pointer does not reshuffle everyone else's."""
-        with session_scope() as db:
-            row = db.get(CursorRow, (session_id, cursor.participantId))
-            if row is None:
-                seq = _next_seq(db, CursorRow.seq, CursorRow.session_id == session_id)
-                db.add(CursorRow.from_model(session_id, cursor, seq))
-            else:
-                row.apply(cursor)
+        list, so a moving pointer does not reshuffle everyone else's.
+
+        One `INSERT … ON CONFLICT DO UPDATE`, rather than a read followed by an
+        insert: this is the hottest write in the app (every participant
+        publishes at roughly 11 Hz), and on Postgres two first publishes
+        arriving together would both read no row and both insert. `seq` is only
+        set by the insert, which is what pins the position.
+        """
+        with serialized_write(), session_scope() as db:
+            seq = _next_seq(db, CursorRow.seq, CursorRow.session_id == session_id)
+            upsert(
+                db,
+                CursorRow,
+                CursorRow.columns_for(session_id, cursor, seq),
+                update=CursorRow.MUTABLE,
+            )
 
     def list_cursors(self, session_id: str) -> list[CursorState]:
         """Only cursors published within the TTL; the server owns the filtering."""

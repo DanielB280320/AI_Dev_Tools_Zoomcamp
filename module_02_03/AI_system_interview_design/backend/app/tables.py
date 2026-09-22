@@ -152,18 +152,23 @@ class CursorRow(Base):
     #: First-publish order, so the list stays stable as cursors are updated.
     seq: Mapped[int] = mapped_column(sa.Integer, default=0)
 
-    @classmethod
-    def from_model(cls, session_id: str, cursor: CursorState, seq: int) -> CursorRow:
-        row = cls(session_id=session_id, participant_id=cursor.participantId, seq=seq)
-        row.apply(cursor)
-        return row
+    #: The columns a publish overwrites — everything except the key and `seq`,
+    #: which is the position the first publish took and keeps.
+    MUTABLE = ("name", "color", "x", "y", "at")
 
-    def apply(self, cursor: CursorState) -> None:
-        self.name = cursor.name
-        self.color = cursor.color
-        self.x = cursor.x
-        self.y = cursor.y
-        self.at = cursor.at
+    @classmethod
+    def columns_for(cls, session_id: str, cursor: CursorState, seq: int) -> dict[str, Any]:
+        """A publish as plain column values, for `db.upsert`."""
+        return {
+            "session_id": session_id,
+            "participant_id": cursor.participantId,
+            "name": cursor.name,
+            "color": cursor.color,
+            "x": cursor.x,
+            "y": cursor.y,
+            "at": cursor.at,
+            "seq": seq,
+        }
 
     def to_model(self) -> CursorState:
         return CursorState(
