@@ -94,6 +94,16 @@ Parameters:
       Optional Route 53 hosted zone holding DomainName; given both, the stack
       creates the A record itself. Leave empty when DNS lives elsewhere.
 
+  EnableCloudFront:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Put a CloudFront distribution in front of the instance, which serves the
+      app over HTTPS on a *.cloudfront.net name without owning a domain. Read
+      the note on the Distribution resource before turning this on for a
+      collaborative session: it proxies the SSE stream.
+
   SeedDemoData:
     Type: String
     Default: "false"
@@ -117,6 +127,7 @@ Parameters:
     Description: Path to the app within that repository.
 
 Conditions:
+  UseCloudFront: !Equals [!Ref EnableCloudFront, "true"]
   HasSsh: !Not [!Equals [!Ref SshAllowedCidr, ""]]
   HasDnsRecord: !And
     - !Not [!Equals [!Ref HostedZoneId, ""]]
@@ -291,6 +302,78 @@ Resources:
       Timeout: "1500"
       Count: 1
 
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: UseCloudFront
+    # The origin is the instance's AWS-provided hostname, which needs the
+    # Elastic IP attached before it resolves to it.
+    DependsOn: ElasticIpAssociation
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          HTTPS without owning a domain: the distribution serves the app under
+          its own *.cloudfront.net certificate, which is the only free way to
+          get a browser-trusted certificate for an address nobody registered.
+          Let's Encrypt refuses to issue for *.compute.amazonaws.com, so the
+          instance cannot obtain one for its own hostname.
+        must:
+          - >-
+            Caching stays disabled and every method is allowed. This is a
+            proxy in front of an API, not a CDN in front of assets; a cached
+            POST response or a dropped Authorization header breaks the app.
+          - >-
+            Origin timeouts stay at or above the SSE keepalive
+            (LOOPBOARD_SSE_KEEPALIVE_SECONDS, 20 s by default). CloudFront
+            closes an origin connection that is silent for OriginReadTimeout,
+            and the canvas stream is silent between events by design.
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} — HTTPS front door"
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        # North America and Europe only; the cheapest class, and this is one
+        # instance in Ohio regardless of where the edge is.
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: instance
+            # ec2-<dashed elastic ip>.<region>.compute.amazonaws.com — built
+            # from the address because CloudFront rejects a bare IP as an
+            # origin, and the instance's own attribute is resolved before the
+            # Elastic IP is attached.
+            DomainName: !Join
+              - ""
+              - - "ec2-"
+                - !Join ["-", !Split [".", !Ref ElasticIp]]
+                - "."
+                - !Ref AWS::Region
+                - ".compute.amazonaws.com"
+            CustomOriginConfig:
+              # Plain HTTP to the origin: the instance has no certificate, and
+              # could not get one for this hostname. TLS ends at the edge.
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginSSLProtocols: [TLSv1.2]
+              # 60 s is the ceiling without a quota increase, and three times
+              # the SSE keepalive. Below the keepalive, every idle stream dies.
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: instance
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          # Managed-CachingDisabled and Managed-AllViewer: nothing is cached,
+          # and every header (Authorization above all), cookie and query
+          # string reaches the app.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          # Caddy already compresses, and compressing at the edge as well
+          # would buffer the event stream that Caddy deliberately does not.
+          Compress: false
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-cdn"}
+
   DnsRecord:
     Type: AWS::Route53::RecordSet
     Condition: HasDnsRecord
@@ -316,6 +399,11 @@ Outputs:
   DnsInstructions:
     Description: What to do next when DNS is not managed in Route 53.
     Value: !Sub "Point an A record for your domain at ${ElasticIp}; Caddy gets the certificate within a minute of it resolving."
+
+  CloudFrontUrl:
+    Condition: UseCloudFront
+    Description: HTTPS address served by CloudFront, with no domain of your own.
+    Value: !Sub "https://${Distribution.DomainName}"
 
   ShellCommand:
     Description: A shell on the instance without an open SSH port.
