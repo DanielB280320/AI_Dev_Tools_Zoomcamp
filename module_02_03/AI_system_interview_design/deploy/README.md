@@ -111,9 +111,10 @@ and pull request that touches this app:
    API client against it (`frontend/scripts/smoke-api.mjs`), then runs the
    Playwright suite in its container.
 3. **Deploy** runs on `main` only. It signs in as the IAM user from
-   `deploy/github-deploy-user.cfn.yaml`, then uses SSM Run Command on the
-   instance to check out the commit the run tested and run `bootstrap.sh`, which
-   is the same redeploy as the manual one above.
+   `deploy/github-deploy-user.cfn.yaml`, then sends that stack's
+   `loopboard-redeploy` SSM document to the instance. The document checks out
+   the commit the run tested, refusing one that is not on `main`, and runs
+   `bootstrap.sh`: the same redeploy as the manual one above.
 4. **Verify** requests `/health` through the public URL (CloudFront when the stack
    has it) and fails the run unless it reports `"status": "ok"`.
 
@@ -137,8 +138,18 @@ unset key_id secret
 (Without `gh`, add the two values under Settings > Secrets and variables >
 Actions > New repository secret.)
 
-The user has no console password. It can read the `loopboard` stack and send
-commands to that stack's instance, and nothing else. It is a long-lived key,
+The user has no console password. It is allowed exactly the four calls the
+deploy job makes:
+
+| Permission | Scoped to |
+| --- | --- |
+| `cloudformation:DescribeStacks`, `DescribeStackResource` | the `loopboard` stack |
+| `ssm:SendCommand` | the `loopboard-redeploy` document, on the instance tagged with the `loopboard` stack |
+| `ssm:GetCommandInvocation` | `*`, because the action has no resource type |
+
+So even a leaked key can only redeploy a commit that is already on `main`. It
+cannot run other commands on the instance, pass a role, or change anything in
+AWS. It is a long-lived key,
 though, so rotate it now and then: create a second key, update both secrets,
 then `aws iam delete-access-key` the old one.
 

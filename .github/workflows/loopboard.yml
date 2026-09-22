@@ -202,31 +202,21 @@ jobs:
           echo "site_url=$site_url" >>"$GITHUB_OUTPUT"
           echo "Deploying $GITHUB_SHA to $instance_id, served at $site_url"
 
-      # Checks out exactly the commit this run tested, rather than whatever
-      # main is by the time the command lands, then runs the same idempotent
-      # bootstrap.sh a manual redeploy does. `checkout -B main` keeps the
-      # instance on a branch, so the README's manual `git pull` still works.
+      # Runs the loopboard-redeploy document from deploy/github-deploy-user.cfn.yaml:
+      # it checks out exactly the commit this run tested (refusing one that is
+      # not on main), then runs the same idempotent bootstrap.sh a manual
+      # redeploy does. The commands live in the document, not here, so the
+      # deploy credentials cannot run anything else on the instance.
       - name: Redeploy the tested commit on the instance
         id: send
         env:
           INSTANCE_ID: ${{ steps.stack.outputs.instance_id }}
         run: |
-          params=$(jq -n --arg sha "$GITHUB_SHA" '{
-            executionTimeout: ["1800"],
-            commands: [
-              "set -eu",
-              "cd /opt/loopboard/repo",
-              "git fetch --depth 1 origin \($sha)",
-              "git checkout --force -B main \($sha)",
-              "/opt/loopboard/app/deploy/bootstrap.sh",
-              "echo deployed-commit=$(git rev-parse HEAD)"
-            ]
-          }')
           command_id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
+            --document-name loopboard-redeploy \
             --comment "loopboard deploy ${GITHUB_SHA::12} (run $GITHUB_RUN_ID)" \
-            --parameters "$params" \
+            --parameters "commitSha=$GITHUB_SHA" \
             --query Command.CommandId --output text)
           echo "command_id=$command_id" >>"$GITHUB_OUTPUT"
           echo "SSM command $command_id"

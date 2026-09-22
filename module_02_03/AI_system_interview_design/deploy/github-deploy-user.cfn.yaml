@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >-
-  The IAM user GitHub Actions deploys Loopboard as. It can read the app stack's
-  outputs and run the redeploy on that stack's instance through Systems
-  Manager, and nothing else.
+  The IAM user GitHub Actions deploys Loopboard as. It can read the app stack,
+  and run one fixed SSM document on that stack's instance, which redeploys a
+  commit that is on main. Nothing else.
 
 Metadata:
   AWSToolsMetrics:
@@ -27,6 +27,11 @@ Metadata:
       - >-
         Rotate the key by creating a second one, updating the GitHub secrets,
         then deleting the first. A user holds at most two keys.
+      - >-
+        The user runs RedeployDocument and no other document. AWS-RunShellScript
+        takes arbitrary commands and runs them as root, so a leaked key would
+        be a root shell on the instance; this document takes only a commit
+        hash, which it refuses unless the hash is on main.
 
 Parameters:
   AppStackName:
@@ -39,7 +44,49 @@ Parameters:
     Default: loopboard-github-deploy
     Description: Name of the IAM user, which `aws iam create-access-key` takes.
 
+  DocumentName:
+    Type: String
+    Default: loopboard-redeploy
+    Description: The SSM document the workflow sends. The workflow names it too.
+
 Resources:
+  RedeployDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Ref DocumentName
+      DocumentType: Command
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: "2.2"
+        description: Redeploy Loopboard at a commit on the main branch.
+        parameters:
+          commitSha:
+            type: String
+            description: Full 40-character commit hash to deploy.
+            # SSM validates this before anything runs, so the value that
+            # reaches the shell below is hex and nothing else.
+            allowedPattern: ^[0-9a-f]{40}$
+        mainSteps:
+          - action: aws:runShellScript
+            name: redeploy
+            inputs:
+              timeoutSeconds: "1800"
+              runCommand:
+                - set -eu
+                - cd /opt/loopboard/repo
+                # GitHub serves any commit in the repository's fork network
+                # by hash, so a fetched hash alone could be someone's fork.
+                # Deploy only what is in main's recent history.
+                - git fetch --depth 100 origin main
+                - >-
+                  git merge-base --is-ancestor {{ commitSha }} FETCH_HEAD
+                  || { echo "{{ commitSha }} is not on main" >&2; exit 1; }
+                # -B main keeps the checkout on a branch, so the README's
+                # manual `git pull` redeploy still works.
+                - git checkout --force -B main {{ commitSha }}
+                - /opt/loopboard/app/deploy/bootstrap.sh
+                - echo "deployed-commit=$(git rev-parse HEAD)"
+
   DeployUser:
     Type: AWS::IAM::User
     Properties:
@@ -57,8 +104,12 @@ Resources:
                   - cloudformation:DescribeStackResource
                 Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*"
 
-              # CloudFormation tags every instance it creates with its stack's
-              # name, so this reaches that stack's instance and no other.
+              # SendCommand is authorized against the instance and the
+              # document separately; both must match. CloudFormation tags every
+              # instance it creates with its stack's name, so this reaches that
+              # stack's instance and no other. No iam:PassRole and no S3
+              # bucket, so a command cannot publish notifications or write its
+              # output anywhere.
               - Sid: RunOnAppInstance
                 Effect: Allow
                 Action: ssm:SendCommand
@@ -67,22 +118,24 @@ Resources:
                   StringEquals:
                     ssm:resourceTag/aws:cloudformation:stack-name: !Ref AppStackName
 
-              - Sid: RunShellScriptDocument
+              - Sid: RunRedeployDocumentOnly
                 Effect: Allow
                 Action: ssm:SendCommand
-                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript"
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${RedeployDocument}"
 
-              # Neither supports resource-level permissions.
-              - Sid: ReadCommandResults
+              # Has no resource type, so it cannot be scoped below "*".
+              - Sid: ReadCommandResult
                 Effect: Allow
-                Action:
-                  - ssm:GetCommandInvocation
-                  - ssm:ListCommandInvocations
+                Action: ssm:GetCommandInvocation
                 Resource: "*"
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-deploy"}
 
 Outputs:
+  RedeployDocumentName:
+    Description: The document the workflow's deploy job sends.
+    Value: !Ref RedeployDocument
+
   DeployUserName:
     Description: Create its access key with `aws iam create-access-key --user-name <this>`.
     Value: !Ref DeployUser
