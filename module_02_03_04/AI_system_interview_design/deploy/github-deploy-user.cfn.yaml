@@ -40,6 +40,10 @@ Metadata:
       - >-
         One environment per stack. Widening a user to both environments would
         undo the separation above — the dev key would become a prod key.
+      - >-
+        AppPath here and in the app stack are the same path. The app stack's
+        copy runs once, in UserData at first boot; this one runs on every
+        deploy, so this is the one that keeps a moved app working.
 
 Parameters:
   EnvironmentName:
@@ -55,6 +59,16 @@ Parameters:
     Description: >-
       The stack deploy/loopboard.cfn.yaml created for this environment — the
       only stack this user may read, and whose instance tag scopes SendCommand.
+
+  AppPath:
+    Type: String
+    Default: module_02_03_04/AI_system_interview_design
+    Description: >-
+      Path to the app within the repository. The document repoints
+      /opt/loopboard/app at it on every deploy, so moving the app in the
+      repository is this parameter and nothing else — no instance replacement,
+      no manual step on the box. Keep it equal to the app stack's AppPath, which
+      only takes effect at first boot.
 
 Resources:
   RedeployDocument:
@@ -91,6 +105,12 @@ Resources:
                 # -B main keeps the checkout on a branch, so the README's
                 # manual `git pull` redeploy still works.
                 - git checkout --force -B main {{ commitSha }}
+                # /opt/loopboard/app is the stable path the next line, the
+                # README and the stack's outputs all use. UserData created it
+                # at first boot, so without this a commit that moves the app
+                # within the repository leaves the symlink dangling and the
+                # deploy fails on a path that no longer exists.
+                - !Sub "ln -sfn /opt/loopboard/repo/${AppPath} /opt/loopboard/app"
                 - /opt/loopboard/app/deploy/bootstrap.sh
                 - echo "deployed-commit=$(git rev-parse HEAD)"
 

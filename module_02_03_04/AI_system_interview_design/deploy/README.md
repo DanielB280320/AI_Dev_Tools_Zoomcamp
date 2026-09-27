@@ -44,6 +44,31 @@ and deleting and recreating this one would hand out a fresh `*.cloudfront.net`
 domain — but that domain *is* the dev URL above. So the original stack stays
 exactly where it is; only its role has a name now.
 
+### Known drift: dev's app stack is a template version behind
+
+The dev *app* stack (`loopboard`) still runs the single-environment template, so
+it has no `EnvironmentName` and its `AppPath` still says `module_02_03`. Its CI
+stack is current, and the redeploy document repoints `/opt/loopboard/app` on
+every deploy, so **dev deploys correctly as it is** — the stale `AppPath` only
+matters at first boot.
+
+It matters if that instance is ever replaced: a fresh one would clone `main`,
+look for a directory that no longer exists, and fail its bootstrap. Bringing it
+up to date is:
+
+```bash
+make deploy-dev
+```
+
+CloudFormation reports the resulting `UserData` change as a *conditional*
+instance recreation: in place while the instance is stopped, a replacement while
+it runs. The Elastic IP survives either way, and the CloudFront origin is derived
+from it, so the dev URL is not at risk — but a replacement does mean a new EBS
+volume and an empty database, which on dev re-seeds the demo data. So do it
+while the instance is stopped, or do it whenever, accepting the re-seed.
+
+Prod was created from the current template and has no such drift.
+
 ### The three account-specific values
 
 `stack.sh` refuses to deploy while an environment file still says `REPLACE_ME`,
