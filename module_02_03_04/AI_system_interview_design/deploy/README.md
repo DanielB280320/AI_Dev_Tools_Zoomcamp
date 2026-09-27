@@ -61,13 +61,37 @@ make deploy-dev
 ```
 
 CloudFormation reports the resulting `UserData` change as a *conditional*
-instance recreation: in place while the instance is stopped, a replacement while
-it runs. The Elastic IP survives either way, and the CloudFront origin is derived
-from it, so the dev URL is not at risk — but a replacement does mean a new EBS
-volume and an empty database, which on dev re-seeds the demo data. So do it
-while the instance is stopped, or do it whenever, accepting the re-seed.
+instance recreation, but observed behaviour on this stack is an **in-place
+update of a running instance** — same instance id, same volume, same database.
+Which leads straight to the trap below.
 
 Prod was created from the current template and has no such drift.
+
+### A stack update does not touch a running instance
+
+`UserData` runs once, on an instance's first boot. CloudFormation will happily
+update it in place on a running instance and report `UPDATE_COMPLETE` — but
+nothing on the box changes, because cloud-init has long since finished. So
+changing any parameter that only reaches the instance through `UserData`
+(`SeedDemoData`, `DomainName`, `LetsEncryptEmail`) is **two** steps:
+
+```bash
+make deploy-prod                                  # 1. the stack, for the next boot
+# 2. the running box, for now:
+aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
+  --parameters 'commands=["sed -i \"s/^SEED_DEMO_DATA=.*/SEED_DEMO_DATA=true/\" /etc/loopboard/deploy.env","/opt/loopboard/app/deploy/bootstrap.sh"]'
+```
+
+Step 1 alone leaves the stack saying one thing and the instance doing another
+until it is next replaced. Step 2 alone works until the instance *is* replaced,
+at which point `UserData` rewrites `/etc/loopboard/deploy.env` from the stack
+and quietly undoes it. Do both, in that order, and they agree.
+
+`bootstrap.sh` is idempotent and keeps the generated database password, so
+re-running it costs a rebuild and about a minute of downtime.
+
+Note what this does *not* do: seeding only populates an **empty** database, so
+turning `SeedDemoData` on later seeds nothing unless the volume is fresh.
 
 ### The three account-specific values
 
