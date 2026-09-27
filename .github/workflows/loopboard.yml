@@ -1,4 +1,4 @@
-# CI/CD for Loopboard (module_02_03/AI_system_interview_design).
+# CI/CD for Loopboard (module_02_03_04/AI_system_interview_design).
 #
 #   backend-tests ─┐
 #                  ├─▶ integration-e2e ─▶ deploy ─▶ verify
@@ -6,13 +6,26 @@
 #
 # The two unit-test jobs run in parallel. The compose stack is built once and
 # both the integration check (the frontend's API client driven against the
-# real server) and the Playwright suite run against it. A push to main then
-# redeploys the tested commit onto the EC2 instance from deploy/loopboard.cfn.yaml
-# through SSM, as the narrowly scoped IAM user from deploy/github-deploy-user.cfn.yaml,
-# and the last job fails the run unless the deployed site's /health answers.
+# real server) and the Playwright suite run against it. The deploy job then
+# redeploys the tested commit onto that environment's EC2 instance from
+# deploy/loopboard.cfn.yaml through SSM, as the narrowly scoped IAM user from
+# deploy/github-deploy-user.cfn.yaml, and the last job fails the run unless the
+# deployed site's /health answers.
 #
-# One-time setup (deploy/README.md, "CI/CD"): create that user's access key and
-# store it as the repository secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+# Two environments, one pipeline:
+#
+#   push to main      ─▶ dev    (automatic)
+#   Run workflow ▸ prod ─▶ prod (manual dispatch only)
+#
+# Prod is never deployed by a push. Reaching it takes a deliberate dispatch,
+# and the tests above still have to pass first, so prod only ever receives a
+# commit that went green. Each environment is a separate CloudFormation stack
+# with its own instance, database and address, and a separate IAM user whose
+# key lives in that GitHub environment — so a dev run holds no prod credential.
+#
+# One-time setup per environment (deploy/README.md, "CI/CD"): create that
+# environment's deploy user key and store it as the AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY secrets *of the matching GitHub environment*.
 
 name: loopboard
 
@@ -20,13 +33,19 @@ on:
   push:
     branches: [main]
     paths:
-      - "module_02_03/AI_system_interview_design/**"
+      - "module_02_03_04/AI_system_interview_design/**"
       - ".github/workflows/loopboard.yml"
   pull_request:
     paths:
-      - "module_02_03/AI_system_interview_design/**"
+      - "module_02_03_04/AI_system_interview_design/**"
       - ".github/workflows/loopboard.yml"
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy once the tests pass
+        type: choice
+        options: [dev, prod]
+        default: dev
 
 # A newer push to the same PR or branch makes the older run's result moot. The
 # deploy job has its own group below, which never cancels a deploy midway.
@@ -38,13 +57,22 @@ permissions:
   contents: read
 
 env:
-  APP_DIR: module_02_03/AI_system_interview_design
+  APP_DIR: module_02_03_04/AI_system_interview_design
   AWS_REGION: us-east-2
-  APP_STACK: loopboard
+  # The environment this run deploys: whatever the dispatch asked for, and dev
+  # for a push. Used in the job's `environment:` and `concurrency:` too, which
+  # are evaluated before any step runs and so cannot read a step's output.
+  TARGET_ENV: ${{ inputs.environment || 'dev' }}
+  # dev keeps the original stack name: CloudFormation cannot rename a stack,
+  # and recreating it would hand out a new *.cloudfront.net domain — but that
+  # domain is the published dev URL, so the stack stays as it is and only its
+  # role is renamed.
+  DEV_STACK: loopboard
+  PROD_STACK: loopboard-prod
 
 defaults:
   run:
-    working-directory: module_02_03/AI_system_interview_design
+    working-directory: module_02_03_04/AI_system_interview_design
 
 jobs:
   backend-tests:
@@ -149,32 +177,56 @@ jobs:
         run: $COMPOSE down --volumes
 
   deploy:
-    name: Deploy to AWS
+    name: Deploy to ${{ inputs.environment || 'dev' }}
     needs: integration-e2e
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    # Shows the live URL on the run and in the repository's Environments
-    # page. Deploys queue rather than overlap.
+    # The GitHub environment named here is where this run's AWS credentials
+    # come from, so a dev run cannot read the prod key. It also shows the live
+    # URL on the run and on the repository's Environments page, and is where a
+    # required reviewer on prod is configured.
+    #
+    # These three cannot read `env`, so they repeat the expression that
+    # TARGET_ENV holds for the steps.
     environment:
-      name: production
+      name: ${{ inputs.environment || 'dev' }}
       url: ${{ steps.stack.outputs.site_url }}
+    # Per environment: a dev deploy and a prod deploy have no reason to wait
+    # for each other, and neither is ever cancelled midway.
     concurrency:
-      group: loopboard-deploy
+      group: loopboard-deploy-${{ inputs.environment || 'dev' }}
       cancel-in-progress: false
     outputs:
       site_url: ${{ steps.stack.outputs.site_url }}
+      environment: ${{ env.TARGET_ENV }}
     # Nothing is checked out here; the instance fetches the commit itself.
     defaults:
       run:
         working-directory: .
     steps:
+      # Which stack and which SSM document this environment deploys. Both are
+      # per-environment: the document name carries the suffix its own
+      # github-deploy-user stack gave it, and the user's policy allows that
+      # one document on that one stack's instance.
+      - name: Resolve the target environment
+        id: target
+        run: |
+          case $TARGET_ENV in
+            dev)  stack=$DEV_STACK ;;
+            prod) stack=$PROD_STACK ;;
+            *) echo "::error::Unknown environment '$TARGET_ENV'"; exit 1 ;;
+          esac
+          echo "stack=$stack" >>"$GITHUB_OUTPUT"
+          echo "document=loopboard-redeploy-$TARGET_ENV" >>"$GITHUB_OUTPUT"
+          echo "Deploying to $TARGET_ENV (stack $stack)"
+
       - name: Check the AWS credentials are configured
         env:
           KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         run: |
           if [[ -z $KEY_ID ]]; then
-            echo "::error::Set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY repository secrets (deploy/README.md, \"CI/CD\")"
+            echo "::error::Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY on the '$TARGET_ENV' GitHub environment (deploy/README.md, \"CI/CD\")"
             exit 1
           fi
 
@@ -186,6 +238,8 @@ jobs:
 
       - name: Find the instance and the public URL
         id: stack
+        env:
+          APP_STACK: ${{ steps.target.outputs.stack }}
         run: |
           instance_id=$(aws cloudformation describe-stack-resource \
             --stack-name "$APP_STACK" --logical-resource-id Instance \
@@ -200,22 +254,24 @@ jobs:
           fi
           echo "instance_id=$instance_id" >>"$GITHUB_OUTPUT"
           echo "site_url=$site_url" >>"$GITHUB_OUTPUT"
-          echo "Deploying $GITHUB_SHA to $instance_id, served at $site_url"
+          echo "Deploying $GITHUB_SHA to $TARGET_ENV instance $instance_id, served at $site_url"
 
-      # Runs the loopboard-redeploy document from deploy/github-deploy-user.cfn.yaml:
-      # it checks out exactly the commit this run tested (refusing one that is
-      # not on main), then runs the same idempotent bootstrap.sh a manual
-      # redeploy does. The commands live in the document, not here, so the
-      # deploy credentials cannot run anything else on the instance.
+      # Runs this environment's loopboard-redeploy-<env> document from
+      # deploy/github-deploy-user.cfn.yaml: it checks out exactly the commit
+      # this run tested (refusing one that is not on main), then runs the same
+      # idempotent bootstrap.sh a manual redeploy does. The commands live in
+      # the document, not here, so the deploy credentials cannot run anything
+      # else on the instance.
       - name: Redeploy the tested commit on the instance
         id: send
         env:
           INSTANCE_ID: ${{ steps.stack.outputs.instance_id }}
+          DOCUMENT: ${{ steps.target.outputs.document }}
         run: |
           command_id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
-            --document-name loopboard-redeploy \
-            --comment "loopboard deploy ${GITHUB_SHA::12} (run $GITHUB_RUN_ID)" \
+            --document-name "$DOCUMENT" \
+            --comment "loopboard $TARGET_ENV deploy ${GITHUB_SHA::12} (run $GITHUB_RUN_ID)" \
             --parameters "commitSha=$GITHUB_SHA" \
             --query Command.CommandId --output text)
           echo "command_id=$command_id" >>"$GITHUB_OUTPUT"
@@ -251,7 +307,7 @@ jobs:
           fi
 
   verify:
-    name: Verify the deployment
+    name: Verify ${{ needs.deploy.outputs.environment }}
     needs: deploy
     runs-on: ubuntu-latest
     timeout-minutes: 10

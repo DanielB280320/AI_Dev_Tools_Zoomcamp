@@ -7,6 +7,11 @@ Description: >-
   broker is per-process, so a second one would serve clients that never hear
   about the first one's edits.
 
+  Deployed once per environment. Every resource here is named from the stack
+  name or left unnamed, so `loopboard-dev` and `loopboard-prod` are two
+  independent copies — separate instance, separate Postgres volume, separate
+  address — sharing nothing but this template and the repository.
+
 Metadata:
   AWSToolsMetrics:
     AWSAgentToolkit: aws-cloudformation@3
@@ -29,6 +34,8 @@ Metadata:
         CloudFormation API for as long as the stack exists.
   AWS::CloudFormation::Interface:
     ParameterGroups:
+      - Label: {default: Environment}
+        Parameters: [EnvironmentName]
       - Label: {default: Network}
         Parameters: [VpcId, SubnetId]
       - Label: {default: Instance}
@@ -39,6 +46,16 @@ Metadata:
         Parameters: [RepoUrl, RepoBranch, AppPath]
 
 Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: >-
+      Which environment this stack is. It changes no behaviour on its own —
+      the isolation comes from being a separate stack — but it tags every
+      resource, so the console and a cost report can tell the two apart, and
+      the instance records it in /etc/loopboard/deploy.env.
+
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: VPC for the instance. The default VPC is the usual answer.
@@ -134,7 +151,7 @@ Parameters:
 
   AppPath:
     Type: String
-    Default: module_02_03/AI_system_interview_design
+    Default: module_02_03_04/AI_system_interview_design
     Description: Path to the app within that repository.
 
 Conditions:
@@ -186,6 +203,7 @@ Resources:
         - {IpProtocol: -1, CidrIp: 0.0.0.0/0, Description: "Package, image and ACME traffic"}
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-sg"}
+        - {Key: Environment, Value: !Ref EnvironmentName}
 
   SshIngress:
     Type: AWS::EC2::SecurityGroupIngress
@@ -217,6 +235,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-role"}
+        - {Key: Environment, Value: !Ref EnvironmentName}
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -235,6 +254,7 @@ Resources:
       Domain: vpc
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-eip"}
+        - {Key: Environment, Value: !Ref EnvironmentName}
 
   ElasticIpAssociation:
     Type: AWS::EC2::EIPAssociation
@@ -271,6 +291,7 @@ Resources:
             DeleteOnTermination: true
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}"}
+        - {Key: Environment, Value: !Ref EnvironmentName}
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -285,6 +306,7 @@ Resources:
           # substituted the values.
           install -d -m 700 /etc/loopboard
           cat > /etc/loopboard/deploy.env <<'EOF_ENV'
+          LOOPBOARD_ENV=${EnvironmentName}
           DOMAIN_NAME=${DomainName}
           LETSENCRYPT_EMAIL=${LetsEncryptEmail}
           SEED_DEMO_DATA=${SeedDemoData}
@@ -404,6 +426,7 @@ Resources:
           Compress: false
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-cdn"}
+        - {Key: Environment, Value: !Ref EnvironmentName}
 
   DnsRecord:
     Type: AWS::Route53::RecordSet
@@ -416,6 +439,10 @@ Resources:
       ResourceRecords: [!Ref ElasticIp]
 
 Outputs:
+  Environment:
+    Description: Which environment this stack is.
+    Value: !Ref EnvironmentName
+
   PublicIp:
     Description: The Elastic IP — the address a DNS A record points at.
     Value: !Ref ElasticIp

@@ -44,11 +44,12 @@ CREDS ?= 1
 
 .PHONY: help install install-api install-web api web dev test smoke lint format creds docs health db-reset clean \
 	db-up db-down db-psql db-wait api-pg test-pg db-reset-pg \
-	up down logs e2e e2e-local install-e2e
+	up down logs e2e e2e-local install-e2e \
+	deploy-dev deploy-prod deploy-ci-dev deploy-ci-prod
 
 help: ## List the available targets
 	@grep -hE '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) \
-		| awk 'BEGIN { FS = ":.*## " } { printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2 }'
+		| awk 'BEGIN { FS = ":.*## " } { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }'
 
 install: install-api install-web ## Install both sides' dependencies
 
@@ -177,6 +178,24 @@ db-reset-pg: db-wait ## Drop every table in Postgres, so the next start re-seeds
 	docker exec $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB) -q \
 		-c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
 	@echo "Postgres emptied — the next 'make api-pg' re-creates and re-seeds it"
+
+# ------------------------------- AWS deploy ----------------------------------
+# Infrastructure, not the app. These create or update one environment's
+# CloudFormation stacks from deploy/environments/<env>.env; the app itself is
+# redeployed onto the running instance by CI — automatically on a push for dev,
+# and by a manual dispatch for prod. deploy/README.md has both stories.
+
+deploy-dev: ## Create or update the dev app stack (CloudFormation)
+	deploy/stack.sh dev
+
+deploy-prod: ## Create or update the prod app stack (CloudFormation)
+	deploy/stack.sh prod
+
+deploy-ci-dev: ## Create or update dev's GitHub deploy user and SSM document
+	deploy/stack.sh dev ci
+
+deploy-ci-prod: ## Create or update prod's GitHub deploy user and SSM document
+	deploy/stack.sh prod ci
 
 clean: ## Delete Python caches and test artefacts
 	find $(BACKEND) -type d -name __pycache__ -prune -exec rm -rf {} +

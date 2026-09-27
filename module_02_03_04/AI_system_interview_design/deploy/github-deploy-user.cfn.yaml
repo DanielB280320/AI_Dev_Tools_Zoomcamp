@@ -1,9 +1,14 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >-
-  The IAM user GitHub Actions deploys Loopboard as. It can read the app stack,
-  and run one fixed SSM document on that stack's instance, which redeploys a
-  commit that is on main. Nothing else.
+  The IAM user GitHub Actions deploys one Loopboard environment as. It can read
+  that environment's app stack, and run one fixed SSM document on that stack's
+  instance, which redeploys a commit that is on main. Nothing else.
+
+  Deployed once per environment, like the app stack it serves. The two users are
+  separate on purpose: the prod key lives only in the prod GitHub environment,
+  so a workflow run that has not been approved for prod holds no credential
+  that could reach it.
 
 Metadata:
   AWSToolsMetrics:
@@ -28,37 +33,39 @@ Metadata:
         Rotate the key by creating a second one, updating the GitHub secrets,
         then deleting the first. A user holds at most two keys.
       - >-
-        The user runs RedeployDocument and no other document. AWS-RunShellScript
-        takes arbitrary commands and runs them as root, so a leaked key would
-        be a root shell on the instance; this document takes only a commit
-        hash, which it refuses unless the hash is on main.
+        The user runs its own RedeployDocument and no other document.
+        AWS-RunShellScript takes arbitrary commands and runs them as root, so a
+        leaked key would be a root shell on the instance; this document takes
+        only a commit hash, which it refuses unless the hash is on main.
+      - >-
+        One environment per stack. Widening a user to both environments would
+        undo the separation above — the dev key would become a prod key.
 
 Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Description: >-
+      Which environment this user deploys. It suffixes the user and document
+      names, so the two stacks never collide on an account-global IAM or SSM
+      name.
+
   AppStackName:
     Type: String
-    Default: loopboard
-    Description: The stack deploy/loopboard.cfn.yaml created.
-
-  UserName:
-    Type: String
-    Default: loopboard-github-deploy
-    Description: Name of the IAM user, which `aws iam create-access-key` takes.
-
-  DocumentName:
-    Type: String
-    Default: loopboard-redeploy
-    Description: The SSM document the workflow sends. The workflow names it too.
+    Description: >-
+      The stack deploy/loopboard.cfn.yaml created for this environment — the
+      only stack this user may read, and whose instance tag scopes SendCommand.
 
 Resources:
   RedeployDocument:
     Type: AWS::SSM::Document
     Properties:
-      Name: !Ref DocumentName
+      Name: !Sub "loopboard-redeploy-${EnvironmentName}"
       DocumentType: Command
       UpdateMethod: NewVersion
       Content:
         schemaVersion: "2.2"
-        description: Redeploy Loopboard at a commit on the main branch.
+        description: !Sub "Redeploy Loopboard (${EnvironmentName}) at a commit on the main branch."
         parameters:
           commitSha:
             type: String
@@ -90,10 +97,10 @@ Resources:
   DeployUser:
     Type: AWS::IAM::User
     Properties:
-      UserName: !Ref UserName
+      UserName: !Sub "loopboard-github-deploy-${EnvironmentName}"
       # No LoginProfile: this user has an access key and no console password.
       Policies:
-        - PolicyName: redeploy-loopboard
+        - PolicyName: !Sub "redeploy-loopboard-${EnvironmentName}"
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -106,10 +113,10 @@ Resources:
 
               # SendCommand is authorized against the instance and the
               # document separately; both must match. CloudFormation tags every
-              # instance it creates with its stack's name, so this reaches that
-              # stack's instance and no other. No iam:PassRole and no S3
-              # bucket, so a command cannot publish notifications or write its
-              # output anywhere.
+              # instance it creates with its stack's name, so this reaches this
+              # environment's instance and not the other environment's. No
+              # iam:PassRole and no S3 bucket, so a command cannot publish
+              # notifications or write its output anywhere.
               - Sid: RunOnAppInstance
                 Effect: Allow
                 Action: ssm:SendCommand
@@ -130,10 +137,15 @@ Resources:
                 Resource: "*"
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-deploy"}
+        - {Key: Environment, Value: !Ref EnvironmentName}
 
 Outputs:
+  Environment:
+    Description: The environment this user deploys.
+    Value: !Ref EnvironmentName
+
   RedeployDocumentName:
-    Description: The document the workflow's deploy job sends.
+    Description: The document the workflow's deploy job sends for this environment.
     Value: !Ref RedeployDocument
 
   DeployUserName:
