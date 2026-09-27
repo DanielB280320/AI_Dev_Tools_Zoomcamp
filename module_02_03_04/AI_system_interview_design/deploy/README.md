@@ -20,7 +20,7 @@ That template is deployed **twice**, once per environment. See
 
 | | dev | prod |
 | --- | --- | --- |
-| URL | https://d1u9mpb2rc8ljk.cloudfront.net/ | the `CloudFrontUrl` output of `loopboard-prod` |
+| URL | https://d1u9mpb2rc8ljk.cloudfront.net/ | https://dh3shz9t8ubjy.cloudfront.net/ |
 | App stack | `loopboard` | `loopboard-prod` |
 | CI stack | `loopboard-github-deploy` | `loopboard-prod-github-deploy` |
 | Parameters | `environments/dev.env` | `environments/prod.env` |
