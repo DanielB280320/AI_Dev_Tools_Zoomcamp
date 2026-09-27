@@ -133,6 +133,10 @@ To switch SQLite database to Postgres we can request the coding agent to create 
 
 ### 5. Integration and end-to-end tests
 
+    # Prompt 1:
+    Create integration tests that run against docker-compose.yaml. What scenarios should we test?
+
+    # Prompt 2:
     Add an end-to-end test that runs against docker-compose.yaml.
 
     Use Playwright to:
@@ -176,3 +180,13 @@ When deploying the app to AWS we need to connect and give access to our coding a
 
     aws cloudformation delete-stack --stack-name sdip
     aws cloudformation wait stack-delete-complete --stack-name sdip
+
+## Module 4:
+
+### 1. Dev and prod environments
+
+    Create a second, independent copy of our deployment infrastructure for a production environment. It should be able to run alongside the existing setup, with its own separate database and compute resources.
+    The current environment will become the dev environment.
+    Domains:
+    interviews.aisl.click → will now point to production
+    dev.interviews.aisl.click → will point to the dev environment (the existing setup)
