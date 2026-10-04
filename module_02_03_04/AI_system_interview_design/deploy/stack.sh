@@ -4,6 +4,7 @@
 #   deploy/stack.sh dev           # the app stack (loopboard.cfn.yaml)
 #   deploy/stack.sh prod
 #   deploy/stack.sh prod ci       # that environment's GitHub deploy user
+#   deploy/stack.sh registry      # the ECR repository both environments share
 #
 # Every input comes from deploy/environments/<env>.env, so a deploy is
 # reproducible from the repository rather than from whoever last ran it. The
@@ -21,10 +22,23 @@ DEPLOY_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ENVIRONMENT=${1:-}
 WHAT=${2:-app}
 
+# One repository for both environments — prod runs the image dev pushed — so it
+# belongs to no environment file.
+if [[ $ENVIRONMENT == registry ]]; then
+	printf 'Deploying stack loopboard-ecr from ecr.cfn.yaml\n'
+	aws cloudformation deploy \
+		--stack-name loopboard-ecr \
+		--template-file "$DEPLOY_DIR/ecr.cfn.yaml" \
+		--tags "Application=loopboard"
+	aws cloudformation describe-stacks --stack-name loopboard-ecr \
+		--query 'Stacks[0].Outputs' --output table
+	exit
+fi
+
 case $ENVIRONMENT in
 	dev | prod) ;;
 	*)
-		echo "usage: ${BASH_SOURCE[0]##*/} <dev|prod> [app|ci]" >&2
+		echo "usage: ${BASH_SOURCE[0]##*/} <dev|prod> [app|ci] | registry" >&2
 		exit 2
 		;;
 esac

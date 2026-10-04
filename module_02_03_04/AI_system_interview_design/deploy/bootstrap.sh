@@ -2,14 +2,20 @@
 # Bring the deployed stack up on a fresh Amazon Linux 2023 instance.
 #
 # The CloudFormation template's UserData installs git, clones the repository to
-# /opt/loopboard/app and runs this. Running it again is the redeploy:
+# /opt/loopboard/app and runs this. CI deploys by running it again with the
+# image to run:
 #
-#   cd /opt/loopboard/app && sudo git pull && sudo deploy/bootstrap.sh
+#   LOOPBOARD_IMAGE=<account>.dkr.ecr.<region>.amazonaws.com/loopboard:<tag> \
+#     sudo -E deploy/bootstrap.sh
 #
-# Everything it needs comes from /etc/loopboard/deploy.env, which UserData
-# writes from the stack's parameters. Nothing here reads the instance metadata
-# or calls AWS, so it also runs on any other Debian/RHEL-ish box with the same
-# file in place.
+# The image is pulled, never built, and recorded in /etc/loopboard/image, so a
+# plain re-run restarts the same image. With no image given and none recorded —
+# a fresh instance before its first CI deploy — the app is built from the
+# checkout instead.
+#
+# Everything else comes from /etc/loopboard/deploy.env, which UserData writes
+# from the stack's parameters. Only the ECR login calls AWS, so without an image
+# it also runs on any other Debian/RHEL-ish box with the same file in place.
 set -euo pipefail
 
 ENV_FILE=/etc/loopboard/deploy.env
@@ -74,6 +80,16 @@ if [[ ! -s $SECRET_FILE ]]; then
 fi
 POSTGRES_PASSWORD=$(cat "$SECRET_FILE")
 
+# --------------------------------------------------------------------- image --
+# Given by the deploy, else whatever the last successful deploy ran. Recorded
+# only after the stack comes up healthy, below, so a failed deploy leaves the
+# previous image as the one a re-run restarts.
+IMAGE_FILE=/etc/loopboard/image
+IMAGE=${LOOPBOARD_IMAGE:-}
+if [[ -z $IMAGE && -s $IMAGE_FILE ]]; then
+	IMAGE=$(cat "$IMAGE_FILE")
+fi
+
 # ---------------------------------------------------------------- compose env --
 # Caddy's site address: a domain gets automatic HTTPS, no domain gets plain
 # HTTP on the instance's address, which is what a stack deployed without a
@@ -98,7 +114,7 @@ else
 fi
 chmod 644 "$DEPLOY_DIR/caddy-acme.conf"
 
-log "writing $DEPLOY_DIR/.env (site: $site, seed: $seed)"
+log "writing $DEPLOY_DIR/.env (site: $site, seed: $seed, image: ${IMAGE:-built here})"
 cat >"$DEPLOY_DIR/.env" <<ENV
 # Written by bootstrap.sh — edit deploy.env and re-run rather than this file.
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
@@ -106,6 +122,7 @@ LOOPBOARD_SITE=$site
 LETSENCRYPT_EMAIL=$LETSENCRYPT_EMAIL
 APP_ORIGIN=$origin
 LOOPBOARD_SEED=$seed
+LOOPBOARD_IMAGE=$IMAGE
 ENV
 chmod 600 "$DEPLOY_DIR/.env"
 
@@ -113,8 +130,24 @@ chmod 600 "$DEPLOY_DIR/.env"
 # `--wait` holds until the health checks pass, so a failure to start is this
 # script's failure — and, through the wait condition, the stack's — rather than
 # a green deployment in front of a container in a restart loop.
-log "building and starting the stack"
-"${COMPOSE[@]}" up -d --build --wait --wait-timeout 300
+if [[ -n $IMAGE ]]; then
+	# <account>.dkr.ecr.<region>.amazonaws.com/<repository>:<tag>
+	registry=${IMAGE%%/*}
+	region=${registry#*.dkr.ecr.}
+	region=${region%%.*}
+	log "pulling $IMAGE"
+	aws ecr get-login-password --region "$region" \
+		| docker login --username AWS --password-stdin "$registry"
+	# `pull` fails outright on a missing image; `up` alone would quietly fall
+	# back to building one from the checkout.
+	"${COMPOSE[@]}" pull app
+	log "starting the stack"
+	"${COMPOSE[@]}" up -d --no-build --wait --wait-timeout 300
+	echo "$IMAGE" >"$IMAGE_FILE"
+else
+	log "no image to pull; building the app from the checkout"
+	"${COMPOSE[@]}" up -d --build --wait --wait-timeout 300
+fi
 
 log "running containers"
 "${COMPOSE[@]}" ps

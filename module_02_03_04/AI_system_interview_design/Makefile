@@ -45,7 +45,7 @@ CREDS ?= 1
 .PHONY: help install install-api install-web api web dev test smoke lint format creds docs health db-reset clean \
 	db-up db-down db-psql db-wait api-pg test-pg db-reset-pg \
 	up down logs e2e e2e-local install-e2e \
-	deploy-dev deploy-prod deploy-ci-dev deploy-ci-prod
+	deploy-dev deploy-prod deploy-ci-dev deploy-ci-prod deploy-registry
 
 help: ## List the available targets
 	@grep -hE '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) \
@@ -184,6 +184,9 @@ db-reset-pg: db-wait ## Drop every table in Postgres, so the next start re-seeds
 # CloudFormation stacks from deploy/environments/<env>.env; the app itself is
 # redeployed onto the running instance by CI — automatically on a push for dev,
 # and by a manual dispatch for prod. deploy/README.md has both stories.
+
+deploy-registry: ## Create or update the ECR repository both environments pull from
+	deploy/stack.sh registry
 
 deploy-dev: ## Create or update the dev app stack (CloudFormation)
 	deploy/stack.sh dev

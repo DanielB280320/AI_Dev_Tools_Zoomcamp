@@ -25,6 +25,7 @@ That template is deployed **twice**, once per environment. See
 | CI stack | `loopboard-github-deploy` | `loopboard-prod-github-deploy` |
 | Parameters | `environments/dev.env` | `environments/prod.env` |
 | Deployed by | every push to `main` | a manual workflow dispatch |
+| Image | built and pushed to ECR by the deploy | the image dev last verified, never rebuilt |
 | Demo data | seeded | off |
 
 Nothing is shared. Each environment is its own CloudFormation stack, and every
@@ -33,7 +34,9 @@ the two get their own instance, their own Elastic IP, their own CloudFront
 distribution and their own Postgres volume. A change to one cannot reach the
 other, and neither can read the other's database.
 
-They do share the VPC and subnet, and the repository the instances build from.
+They do share the VPC and subnet, the repository the instances check out, and
+the ECR repository the app image comes from — sharing that last one is the
+point, see [Images and promotion](#images-and-promotion).
 The subnet is shared because a second public subnet would be one more thing to
 maintain and would isolate nothing that matters: the instances are separate
 hosts with separate security groups either way, and neither one can reach the
@@ -210,18 +213,22 @@ sudo docker compose -f docker-compose.prod.yaml logs -f app
 sudo docker compose -f docker-compose.prod.yaml exec db psql -U loopboard
 ```
 
-**Redeploy** after pushing a commit — the instance builds from the repository,
-so there is no image to push anywhere:
+**Restart** the running image, or apply a changed setting:
 
 ```bash
-cd /opt/loopboard/repo && sudo git pull
 sudo /opt/loopboard/app/deploy/bootstrap.sh
 ```
 
-`bootstrap.sh` is idempotent: it keeps the generated database password, rebuilds
-the images and waits for the health checks. It is also how a setting changes —
-edit `/etc/loopboard/deploy.env` (the domain, the Let's Encrypt address, whether
-to seed demo data) and run it again.
+`bootstrap.sh` is idempotent: it keeps the generated database password, pulls
+the image recorded in `/etc/loopboard/image` (the last one a deploy ran
+successfully) and waits for the health checks. It is also how a setting changes
+— edit `/etc/loopboard/deploy.env` (the domain, the Let's Encrypt address,
+whether to seed demo data) and run it again. A new *version* of the app arrives
+through CI, as an image; see below.
+
+Before its first CI deploy an instance has no recorded image, and
+`bootstrap.sh` builds one from the checkout instead — that is how a fresh stack
+comes up at all, before anything has been pushed.
 
 **Back up** the database, which is the only state worth keeping:
 
@@ -241,12 +248,62 @@ and pull request that touches this app:
    API client against it (`frontend/scripts/smoke-api.mjs`), then runs the
    Playwright suite in its container.
 3. **Deploy** runs on `main` only. It signs in as that environment's IAM user
-   from `github-deploy-user.cfn.yaml`, then sends that stack's
-   `loopboard-redeploy-<env>` SSM document to the instance. The document checks
-   out the commit the run tested, refusing one that is not on `main`, and runs
-   `bootstrap.sh`: the same redeploy as the manual one above.
+   from `github-deploy-user.cfn.yaml` and settles which image to run (below),
+   then sends that stack's `loopboard-redeploy-<env>` SSM document to the
+   instance. The document checks out the commit the image was built from,
+   refusing one that is not on `main` or that the tag does not name, and runs
+   `bootstrap.sh`, which pulls the image and starts it.
 4. **Verify** requests `/health` through the public URL (CloudFront when the stack
    has it) and fails the run unless it reports `"status": "ok"`.
+5. **Record** (dev only) writes the image's tag to the SSM parameter
+   `/loopboard/dev/deployed-image`, making it the one a prod deploy promotes.
+
+### Images and promotion
+
+```
+push to main ─▶ build once ─▶ ECR loopboard:20260813-163457-83242da ─▶ dev ─▶ /health ok
+                                          │                                       │
+Run workflow ▸ prod ─────────────────────▶└── same tag, pulled, not rebuilt ◀── record
+```
+
+The image is built **once**, by the dev deploy, and tagged
+`YYYYMMDD-HHMMSS-<git sha>` — the UTC build time and the 7-character commit, e.g.
+`20260813-163457-83242da`. It goes to the ECR repository from `ecr.cfn.yaml`,
+and dev pulls and runs it.
+
+Promoting to prod does not rebuild. A rebuild, even of the same commit, would be
+a second image that was never tested — base images, npm and PyPI all resolve
+again. Instead, once dev answers `/health` with an image, the `record` job
+writes its tag and commit to `/loopboard/dev/deployed-image`, and a prod
+dispatch reads that and runs the same tag. So prod runs exactly what was tested
+in dev. Nothing is built, so the tests are skipped on a prod run.
+
+What makes that hold:
+
+- **Tags are immutable** in the repository. A tag cannot be re-pointed at a
+  different image after dev tested it.
+- **Prod's IAM user cannot push.** The only images it can deploy are ones dev's
+  user pushed; the promotion is enforced by IAM, not just by the workflow.
+- **The record is written only after verify.** A build that fails its health
+  check on dev is never what prod picks up.
+- **The SSM document checks the tag against the commit**, so the compose file
+  and `bootstrap.sh` that run an image are always from the commit it was built
+  from.
+
+Which image is where:
+
+```bash
+aws ssm get-parameter --name /loopboard/dev/deployed-image --query Parameter.Value --output text
+aws ecr describe-images --repository-name loopboard \
+  --query 'reverse(sort_by(imageDetails,&imagePushedAt))[:10].[imageTags[0],imagePushedAt]' --output table
+# on an instance:
+cat /etc/loopboard/image
+```
+
+The repository keeps the newest 50 images (`ImagesToKeep` in `ecr.cfn.yaml`).
+Prod runs an image at most as old as its last promotion, so that only matters
+if prod goes 50 dev deploys without one — and then only if its instance is
+replaced, since the running instance already has the image locally.
 
 ### Which environment a run deploys
 
@@ -256,9 +313,9 @@ Run workflow ▸ prod     ─▶ prod    manual only
 ```
 
 A push never touches prod. Deploying prod means opening **Actions ▸ loopboard ▸
-Run workflow** and choosing `prod` — and even then the whole test pipeline runs
-first, so prod only ever receives a commit that went green. The dispatch must be
-on `main`; the SSM document refuses a commit that is not in `main`'s history
+Run workflow** and choosing `prod`, which promotes the image dev last verified —
+so prod only ever receives an image that went green, on dev. The dispatch must
+be on `main`; the SSM document refuses a commit that is not in `main`'s history
 regardless.
 
 The job's GitHub environment is `dev` or `prod`, which is where its AWS
@@ -266,15 +323,27 @@ credentials come from — so a dev run holds no key that could reach prod. Add a
 required reviewer to the `prod` environment (Settings ▸ Environments ▸ prod ▸
 Required reviewers) to make a prod deploy wait for an approval as well.
 
-### One-time setup, per environment
+### One-time setup
 
-Each environment has its own deploy user, so the prod key exists only inside the
-`prod` environment's secrets:
+The image repository, once for both environments:
+
+```bash
+make deploy-registry    # creates the loopboard ECR repository (stack loopboard-ecr)
+```
+
+Then each environment's deploy user — so the prod key exists only inside the
+`prod` environment's secrets — and its app stack, whose instance role is what
+may pull from that repository:
 
 ```bash
 make deploy-ci-dev      # creates loopboard-github-deploy-dev  + loopboard-redeploy-dev
 make deploy-ci-prod     # creates loopboard-github-deploy-prod + loopboard-redeploy-prod
+make deploy-dev         # instance role: pull from ECR
+make deploy-prod
 ```
+
+Until a dev deploy has passed verify, there is nothing to promote and a prod
+dispatch fails with that message.
 
 Then mint each user's key straight into its GitHub environment, so the secret
 never lands in a file or on screen:
@@ -311,18 +380,25 @@ secrets under it.)
 
 ### What a leaked key can do
 
-Each user has no console password and is allowed exactly the four calls its
-deploy job makes, against its own environment only:
+Each user has no console password and is allowed exactly the calls its deploy
+job makes, against its own environment only:
 
-| Permission | Scoped to |
-| --- | --- |
-| `cloudformation:DescribeStacks`, `DescribeStackResource` | that environment's app stack |
-| `ssm:SendCommand` | the `loopboard-redeploy-<env>` document, on the instance tagged with that stack |
-| `ssm:GetCommandInvocation` | `*`, because the action has no resource type |
+| Permission | User | Scoped to |
+| --- | --- | --- |
+| `cloudformation:DescribeStacks`, `DescribeStackResource` | both | that environment's app stack |
+| `ssm:SendCommand` | both | the `loopboard-redeploy-<env>` document, on the instance tagged with that stack |
+| `ssm:GetCommandInvocation` | both | `*`, because the action has no resource type |
+| `ecr:GetAuthorizationToken` | dev | `*`, because the action has no resource type |
+| ECR push (`PutImage` and the layer uploads) | dev | the `loopboard` repository |
+| `ssm:PutParameter` | dev | `/loopboard/dev/deployed-image` |
+| `ssm:GetParameter` | prod | `/loopboard/dev/deployed-image` |
+| `ecr:DescribeImages` | prod | the `loopboard` repository |
 
-So even a leaked key can only redeploy a commit that is already on `main`, onto
-one environment's instance. It cannot run other commands there, pass a role,
-reach the other environment, or change anything in AWS. They are long-lived
+So even a leaked key can only deploy an image built from a commit that is
+already on `main`, onto one environment's instance. It cannot run other
+commands there, pass a role, or reach the other environment. A leaked dev key
+can push a new image and mark it promotable — but cannot overwrite an existing
+tag, and prod only picks it up on a deliberate dispatch. They are long-lived
 keys, though, so rotate them now and then: create a second key, update that
 environment's two secrets, then `aws iam delete-access-key` the old one.
 
@@ -338,6 +414,7 @@ the Free plan that cannot be lifted.
 | Postgres password | `sdip`, in the file | generated per instance into `/etc/loopboard/postgres_password` |
 | Postgres port | published on 5432 | not published at all |
 | Demo data | seeded | off, unless `SeedDemoData=true` |
+| App image | built locally | pulled from ECR (built locally only before the first CI deploy) |
 | Front door | the app on `:8000` | Caddy on `:80`/`:443`, app not published |
 | TLS | none | Let's Encrypt, renewed automatically |
 
@@ -349,7 +426,8 @@ the Elastic IP free while attached to a running instance. No load balancer, no
 NAT gateway, no managed database — the three line items that usually dominate a
 small deployment.
 
-Two environments is therefore about **$36/month**. Every resource carries an
+Two environments is therefore about **$36/month**, plus about $1/month for the
+images ECR keeps (50 at roughly 200 MB, $0.10/GB-month). Every resource carries an
 `Environment` tag, so Cost Explorer can split the bill between them once the tag
 is activated as a cost allocation tag (Billing ▸ Cost allocation tags).
 
@@ -361,6 +439,10 @@ from a running instance. To delete one outright, database and all:
 aws cloudformation delete-stack --stack-name loopboard-prod
 aws cloudformation delete-stack --stack-name loopboard-prod-github-deploy
 ```
+
+The ECR repository is shared, so it goes only once both environments have:
+`aws ecr delete-repository --repository-name loopboard --force`, then
+`aws cloudformation delete-stack --stack-name loopboard-ecr`.
 
 ## Before a real audience
 

@@ -32,6 +32,10 @@ services:
     restart: unless-stopped
 
   app:
+    # The image CI built for dev and pushed to ECR, as bootstrap.sh writes it
+    # into .env. Empty only before the first CI deploy, when `build` below
+    # makes a local one under this default name instead.
+    image: ${LOOPBOARD_IMAGE:-loopboard-app}
     build:
       # The Dockerfile and the sources it copies are one level up.
       context: ..

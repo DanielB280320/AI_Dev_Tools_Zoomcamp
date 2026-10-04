@@ -3,7 +3,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   The IAM user GitHub Actions deploys one Loopboard environment as. It can read
   that environment's app stack, and run one fixed SSM document on that stack's
-  instance, which redeploys a commit that is on main. Nothing else.
+  instance, which deploys an image from ECR at a commit that is on main. dev's
+  user also pushes that image and records it once dev is verified; prod's user
+  reads that record and nothing else from dev. Nothing else.
 
   Deployed once per environment, like the app stack it serves. The two users are
   separate on purpose: the prod key lives only in the prod GitHub environment,
@@ -41,6 +43,10 @@ Metadata:
         One environment per stack. Widening a user to both environments would
         undo the separation above — the dev key would become a prod key.
       - >-
+        Prod never builds. Its user has no ECR push permission, so the only
+        image it can deploy is one dev's user pushed — the promotion is
+        enforced by IAM, not just by the workflow.
+      - >-
         AppPath here and in the app stack are the same path. The app stack's
         copy runs once, in UserData at first boot; this one runs on every
         deploy, so this is the one that keeps a moved app working.
@@ -70,6 +76,24 @@ Parameters:
       no manual step on the box. Keep it equal to the app stack's AppPath, which
       only takes effect at first boot.
 
+  ImageRepositoryName:
+    Type: String
+    Default: loopboard
+    Description: The ECR repository from deploy/ecr.cfn.yaml.
+
+  PromotionParameterName:
+    Type: String
+    Default: /loopboard/dev/deployed-image
+    Description: >-
+      Where dev's last verified image is recorded, as JSON {"tag", "commit"}.
+      dev's user writes it once dev answers /health; prod's user reads it to
+      know what to promote. Not created here, so a stack update never resets
+      it — the first verified dev deploy creates it.
+
+Conditions:
+  IsDev: !Equals [!Ref EnvironmentName, dev]
+  IsProd: !Equals [!Ref EnvironmentName, prod]
+
 Resources:
   RedeployDocument:
     Type: AWS::SSM::Document
@@ -79,14 +103,18 @@ Resources:
       UpdateMethod: NewVersion
       Content:
         schemaVersion: "2.2"
-        description: !Sub "Redeploy Loopboard (${EnvironmentName}) at a commit on the main branch."
+        description: !Sub "Deploy a Loopboard image from ECR (${EnvironmentName}) at the commit on main it was built from."
         parameters:
           commitSha:
             type: String
-            description: Full 40-character commit hash to deploy.
+            description: Full 40-character commit hash the image was built from.
             # SSM validates this before anything runs, so the value that
             # reaches the shell below is hex and nothing else.
             allowedPattern: ^[0-9a-f]{40}$
+          imageTag:
+            type: String
+            description: Image tag in ECR, YYYYMMDD-HHMMSS-<7-char git sha>.
+            allowedPattern: ^[0-9]{8}-[0-9]{6}-[0-9a-f]{7}$
         mainSteps:
           - action: aws:runShellScript
             name: redeploy
@@ -104,6 +132,12 @@ Resources:
                   || { echo "{{ commitSha }} is not on main" >&2; exit 1; }
                 # -B main keeps the checkout on a branch, so the README's
                 # manual `git pull` redeploy still works.
+                # The image and the compose file and bootstrap.sh that run it
+                # come from the same commit, or a promoted image could meet a
+                # deploy script from a later one.
+                - >-
+                  [ "$(printf %.7s {{ commitSha }})" = "$(echo {{ imageTag }} | cut -d- -f3)" ]
+                  || { echo "{{ imageTag }} was not built from {{ commitSha }}" >&2; exit 1; }
                 - git checkout --force -B main {{ commitSha }}
                 # /opt/loopboard/app is the stable path the next line, the
                 # README and the stack's outputs all use. UserData created it
@@ -111,8 +145,11 @@ Resources:
                 # within the repository leaves the symlink dangling and the
                 # deploy fails on a path that no longer exists.
                 - !Sub "ln -sfn /opt/loopboard/repo/${AppPath} /opt/loopboard/app"
-                - /opt/loopboard/app/deploy/bootstrap.sh
+                # Same account and Region as this document, and the instance
+                # role may pull from this one repository only.
+                - !Sub "LOOPBOARD_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ImageRepositoryName}:{{ imageTag }} /opt/loopboard/app/deploy/bootstrap.sh"
                 - echo "deployed-commit=$(git rev-parse HEAD)"
+                - echo "deployed-image={{ imageTag }}"
 
   DeployUser:
     Type: AWS::IAM::User
@@ -155,6 +192,58 @@ Resources:
                 Effect: Allow
                 Action: ssm:GetCommandInvocation
                 Resource: "*"
+
+              # Registry-wide by design; it grants a login token, and what the
+              # token can do is decided by the statements below.
+              - !If
+                - IsDev
+                - Sid: EcrLogin
+                  Effect: Allow
+                  Action: ecr:GetAuthorizationToken
+                  Resource: "*"
+                - !Ref AWS::NoValue
+
+              # Dev builds the image, so only dev pushes. Tags are immutable,
+              # so a push can add an image but never replace one prod runs.
+              - !If
+                - IsDev
+                - Sid: PushImage
+                  Effect: Allow
+                  Action:
+                    - ecr:BatchCheckLayerAvailability
+                    - ecr:InitiateLayerUpload
+                    - ecr:UploadLayerPart
+                    - ecr:CompleteLayerUpload
+                    - ecr:PutImage
+                    - ecr:BatchGetImage
+                  Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImageRepositoryName}"
+                - !Ref AWS::NoValue
+
+              - !If
+                - IsDev
+                - Sid: RecordVerifiedImage
+                  Effect: Allow
+                  Action: ssm:PutParameter
+                  Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PromotionParameterName}"
+                - !Ref AWS::NoValue
+
+              # Prod reads which image dev verified, and checks it is still in
+              # the repository before sending a deploy that would fail to pull.
+              - !If
+                - IsProd
+                - Sid: ReadVerifiedImage
+                  Effect: Allow
+                  Action: ssm:GetParameter
+                  Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PromotionParameterName}"
+                - !Ref AWS::NoValue
+
+              - !If
+                - IsProd
+                - Sid: CheckImageExists
+                  Effect: Allow
+                  Action: ecr:DescribeImages
+                  Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImageRepositoryName}"
+                - !Ref AWS::NoValue
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-deploy"}
         - {Key: Environment, Value: !Ref EnvironmentName}
@@ -163,6 +252,10 @@ Outputs:
   Environment:
     Description: The environment this user deploys.
     Value: !Ref EnvironmentName
+
+  PromotionParameter:
+    Description: dev's last verified image — written by dev's user, read by prod's.
+    Value: !Ref PromotionParameterName
 
   RedeployDocumentName:
     Description: The document the workflow's deploy job sends for this environment.

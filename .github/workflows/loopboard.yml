@@ -1,25 +1,31 @@
 # CI/CD for Loopboard (module_02_03_04/AI_system_interview_design).
 #
 #   backend-tests ─┐
-#                  ├─▶ integration-e2e ─▶ deploy ─▶ verify
-#   frontend-tests ┘                     (main only)
+#                  ├─▶ integration-e2e ─▶ deploy ─▶ verify ─▶ record
+#   frontend-tests ┘                     (main only)          (dev only)
 #
 # The two unit-test jobs run in parallel. The compose stack is built once and
 # both the integration check (the frontend's API client driven against the
 # real server) and the Playwright suite run against it. The deploy job then
-# redeploys the tested commit onto that environment's EC2 instance from
-# deploy/loopboard.cfn.yaml through SSM, as the narrowly scoped IAM user from
-# deploy/github-deploy-user.cfn.yaml, and the last job fails the run unless the
+# deploys onto that environment's EC2 instance from deploy/loopboard.cfn.yaml
+# through SSM, as the narrowly scoped IAM user from
+# deploy/github-deploy-user.cfn.yaml, and verify fails the run unless the
 # deployed site's /health answers.
 #
-# Two environments, one pipeline:
+# Two environments, one image:
 #
-#   push to main      ─▶ dev    (automatic)
-#   Run workflow ▸ prod ─▶ prod (manual dispatch only)
+#   push to main        ─▶ dev   build once, push to ECR, run it
+#   Run workflow ▸ prod ─▶ prod  run the image dev last verified; no rebuild
+#
+# The image is tagged YYYYMMDD-HHMMSS-<git sha> (e.g. 20260813-163457-83242da),
+# and the tag is immutable in ECR. Once dev answers /health, `record` writes
+# that tag to the SSM parameter /loopboard/dev/deployed-image. A prod dispatch
+# reads it and deploys that exact image, so what runs in prod is what was
+# tested in dev — and since nothing is built, the tests do not run again.
 #
 # Prod is never deployed by a push. Reaching it takes a deliberate dispatch,
-# and the tests above still have to pass first, so prod only ever receives a
-# commit that went green. Each environment is a separate CloudFormation stack
+# and it can only receive an image that went green on dev: its IAM user cannot
+# push to ECR at all. Each environment is a separate CloudFormation stack
 # with its own instance, database and address, and a separate IAM user whose
 # key lives in that GitHub environment — so a dev run holds no prod credential.
 #
@@ -69,6 +75,10 @@ env:
   # role is renamed.
   DEV_STACK: loopboard
   PROD_STACK: loopboard-prod
+  # deploy/ecr.cfn.yaml, shared by both environments.
+  ECR_REPOSITORY: loopboard
+  # Written by `record` (dev's user), read by a prod deploy (prod's user).
+  PROMOTION_PARAMETER: /loopboard/dev/deployed-image
 
 defaults:
   run:
@@ -77,6 +87,8 @@ defaults:
 jobs:
   backend-tests:
     name: Backend tests
+    # A prod promotion builds nothing, so there is nothing new to test.
+    if: inputs.environment != 'prod'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -97,6 +109,8 @@ jobs:
 
   frontend-tests:
     name: Frontend tests
+    # A prod promotion builds nothing, so there is nothing new to test.
+    if: inputs.environment != 'prod'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -123,6 +137,7 @@ jobs:
   integration-e2e:
     name: Integration and end-to-end tests
     needs: [backend-tests, frontend-tests]
+    if: inputs.environment != 'prod'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -179,7 +194,11 @@ jobs:
   deploy:
     name: Deploy to ${{ inputs.environment || 'dev' }}
     needs: integration-e2e
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # !failure() rather than the implicit success(): on a prod promotion the
+    # tests are skipped, and a skipped need would otherwise skip this too.
+    if: >-
+      !cancelled() && !failure()
+      && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # The GitHub environment named here is where this run's AWS credentials
@@ -200,7 +219,10 @@ jobs:
     outputs:
       site_url: ${{ steps.stack.outputs.site_url }}
       environment: ${{ env.TARGET_ENV }}
-    # Nothing is checked out here; the instance fetches the commit itself.
+      image_tag: ${{ steps.image.outputs.tag }}
+      commit: ${{ steps.image.outputs.commit }}
+    # Only dev checks anything out, to build; the instance fetches the commit
+    # itself.
     defaults:
       run:
         working-directory: .
@@ -254,25 +276,84 @@ jobs:
           fi
           echo "instance_id=$instance_id" >>"$GITHUB_OUTPUT"
           echo "site_url=$site_url" >>"$GITHUB_OUTPUT"
-          echo "Deploying $GITHUB_SHA to $TARGET_ENV instance $instance_id, served at $site_url"
+          echo "Deploying to $TARGET_ENV instance $instance_id, served at $site_url"
+
+      # ----- dev: build the image once and push it -----
+      - uses: actions/checkout@v5
+        if: env.TARGET_ENV == 'dev'
+
+      - name: Log in to ECR
+        id: ecr
+        if: env.TARGET_ENV == 'dev'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the image
+        id: build
+        if: env.TARGET_ENV == 'dev'
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          tag="$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          image="$REGISTRY/$ECR_REPOSITORY:$tag"
+          docker build \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$tag" \
+            -t "$image" .
+          docker push "$image"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "commit=$GITHUB_SHA" >>"$GITHUB_OUTPUT"
+          echo "### Built \`$tag\`" >>"$GITHUB_STEP_SUMMARY"
+
+      # ----- prod: take the image dev last verified -----
+      - name: Find the image dev is running
+        id: promote
+        if: env.TARGET_ENV == 'prod'
+        run: |
+          if ! record=$(aws ssm get-parameter --name "$PROMOTION_PARAMETER" \
+              --query Parameter.Value --output text); then
+            echo "::error::Nothing to promote: $PROMOTION_PARAMETER is unreadable or absent. A dev deploy writes it once dev passes /health."
+            exit 1
+          fi
+          tag=$(jq -r .tag <<<"$record")
+          commit=$(jq -r .commit <<<"$record")
+          # The lifecycle policy expires old images; fail here rather than in
+          # a pull on the instance halfway through the deploy.
+          aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$tag" --query 'imageDetails[0].imagePushedAt' --output text
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+          echo "### Promoting \`$tag\` from dev" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Image to deploy
+        id: image
+        env:
+          TAG: ${{ steps.build.outputs.tag || steps.promote.outputs.tag }}
+          COMMIT: ${{ steps.build.outputs.commit || steps.promote.outputs.commit }}
+        run: |
+          echo "tag=$TAG" >>"$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >>"$GITHUB_OUTPUT"
+          echo "Deploying image $TAG (commit $COMMIT) to $TARGET_ENV"
 
       # Runs this environment's loopboard-redeploy-<env> document from
-      # deploy/github-deploy-user.cfn.yaml: it checks out exactly the commit
-      # this run tested (refusing one that is not on main), then runs the same
-      # idempotent bootstrap.sh a manual redeploy does. The commands live in
-      # the document, not here, so the deploy credentials cannot run anything
-      # else on the instance.
-      - name: Redeploy the tested commit on the instance
+      # deploy/github-deploy-user.cfn.yaml: it checks out the commit the image
+      # was built from (refusing one that is not on main, or one the tag does
+      # not name), then runs bootstrap.sh, which pulls that image and starts
+      # it. The commands live in the document, not here, so the deploy
+      # credentials cannot run anything else on the instance.
+      - name: Deploy the image on the instance
         id: send
         env:
           INSTANCE_ID: ${{ steps.stack.outputs.instance_id }}
           DOCUMENT: ${{ steps.target.outputs.document }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          COMMIT: ${{ steps.image.outputs.commit }}
         run: |
           command_id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "$DOCUMENT" \
-            --comment "loopboard $TARGET_ENV deploy ${GITHUB_SHA::12} (run $GITHUB_RUN_ID)" \
-            --parameters "commitSha=$GITHUB_SHA" \
+            --comment "loopboard $TARGET_ENV deploy $IMAGE_TAG (run $GITHUB_RUN_ID)" \
+            --parameters "commitSha=$COMMIT,imageTag=$IMAGE_TAG" \
             --query Command.CommandId --output text)
           echo "command_id=$command_id" >>"$GITHUB_OUTPUT"
           echo "SSM command $command_id"
@@ -333,3 +414,37 @@ jobs:
           done
           echo "::error::$url did not report {\"status\": \"ok\"} within 5 minutes"
           exit 1
+
+  # Marks dev's image as the one a prod dispatch promotes — only now that dev
+  # has answered /health with it, so a broken build is never promotable.
+  record:
+    name: Record dev's image for promotion
+    needs: [deploy, verify]
+    if: needs.deploy.outputs.environment == 'dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # For dev's credentials; only dev's user may write the parameter.
+    environment: dev
+    concurrency:
+      group: loopboard-deploy-dev-record
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Write the promotion record
+        env:
+          TAG: ${{ needs.deploy.outputs.image_tag }}
+          COMMIT: ${{ needs.deploy.outputs.commit }}
+        run: |
+          aws ssm put-parameter --name "$PROMOTION_PARAMETER" --type String --overwrite \
+            --value "$(jq -nc --arg tag "$TAG" --arg commit "$COMMIT" '{tag: $tag, commit: $commit}')" \
+            >/dev/null
+          echo "$PROMOTION_PARAMETER = $TAG ($COMMIT)"
+          echo "### \`$TAG\` is now what a prod deploy promotes" >>"$GITHUB_STEP_SUMMARY"

@@ -18,10 +18,11 @@ Metadata:
   com.aws.cloudformation.Context:
     why: >-
       The deployable form of a stack that is already tested as docker-compose
-      (`make e2e`), so the thing deployed stays the thing tested. The instance
-      builds the images from the public repository at boot, which keeps the
-      template self-contained: no registry, no build pipeline, no artifact to
-      upload before a deploy.
+      (`make e2e`), so the thing deployed stays the thing tested. At first boot
+      the instance builds the app image from the public repository, which keeps
+      a fresh stack self-contained; from the first CI deploy on, it pulls the
+      image dev built and pushed to ECR (deploy/ecr.cfn.yaml) instead, so prod
+      runs exactly the image dev was verified with.
     must:
       - >-
         Exactly one app process. `backend/app/events.py` keeps its SSE
@@ -43,7 +44,7 @@ Metadata:
       - Label: {default: Site}
         Parameters: [DomainName, LetsEncryptEmail, HostedZoneId, SeedDemoData]
       - Label: {default: Source}
-        Parameters: [RepoUrl, RepoBranch, AppPath]
+        Parameters: [RepoUrl, RepoBranch, AppPath, ImageRepositoryName]
 
 Parameters:
   EnvironmentName:
@@ -154,6 +155,13 @@ Parameters:
     Default: module_02_03_04/AI_system_interview_design
     Description: Path to the app within that repository.
 
+  ImageRepositoryName:
+    Type: String
+    Default: loopboard
+    Description: >-
+      The ECR repository from deploy/ecr.cfn.yaml; the instance may pull from it
+      and from nothing else in the registry.
+
 Conditions:
   UseCloudFront: !Equals [!Ref EnableCloudFront, "true"]
   LockOriginToCloudFront: !And
@@ -221,9 +229,8 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Session Manager only. The instance calls no AWS API of its own — it
-          clones from a public repository and pulls public images — so this
-          role exists to give shell access without an open SSH port.
+          Session Manager, and pulling the app image from this project's one
+          ECR repository. Everything else the instance fetches is public.
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -233,6 +240,21 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: pull-app-image
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Registry-wide by design; the token can only do what the
+              # statement below allows.
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImageRepositoryName}"
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-role"}
         - {Key: Environment, Value: !Ref EnvironmentName}
@@ -475,8 +497,8 @@ Outputs:
     Value: !Sub "aws ssm start-session --target ${Instance} --region ${AWS::Region}"
 
   RedeployCommand:
-    Description: Pull the latest commit and rebuild, run on the instance.
-    Value: "cd /opt/loopboard/repo && sudo git pull && sudo /opt/loopboard/app/deploy/bootstrap.sh"
+    Description: Restart the recorded image (or rebuild, before the first CI deploy), run on the instance.
+    Value: "sudo /opt/loopboard/app/deploy/bootstrap.sh"
 
   LogCommand:
     Description: Follow the application logs, run on the instance.

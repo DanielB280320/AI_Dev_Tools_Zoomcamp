@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  The ECR repository Loopboard's images live in. Shared by both environments on
+  purpose: dev's deploy builds an image once and pushes it here, dev runs it,
+  and promoting to prod runs that same image — so there is one repository, not
+  one per environment.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    why: >-
+      Build once, promote the artifact. A rebuild for prod would be a second,
+      untested image even from the same commit (base images, npm and PyPI
+      resolve again), so prod pulls the exact image dev was verified with.
+    must:
+      - >-
+        Tags stay IMMUTABLE. A tag is the promotion record — YYYYMMDD-HHMMSS-<git
+        sha> — and prod deploys by tag, so a tag that could be re-pointed would
+        let prod run something dev never ran.
+      - >-
+        The lifecycle rule keeps enough images that whatever prod runs is still
+        here. Prod lags dev by at most the images pushed since its last
+        promotion; an instance replaced after its image expired cannot pull it.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: loopboard
+    Description: >-
+      Matches ImageRepositoryName in the app and CI stacks, which scope their
+      push and pull permissions to this one repository.
+
+  ImagesToKeep:
+    Type: Number
+    Default: 50
+    MinValue: 10
+    Description: >-
+      Newest tagged images kept; older ones expire. Each is about 200 MB, so
+      fifty is about 10 GB, roughly $1/month.
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Untagged layers left behind by an interrupted push",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": {"type": "expire"}
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep the newest ${ImagesToKeep} tagged images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${ImagesToKeep}
+                },
+                "action": {"type": "expire"}
+              }
+            ]
+          }
+      Tags:
+        - {Key: Name, Value: !Ref RepositoryName}
+
+Outputs:
+  RepositoryName:
+    Value: !Ref Repository
+
+  RepositoryUri:
+    Description: Where images are pushed, as <this>:<YYYYMMDD-HHMMSS-sha>.
+    Value: !GetAtt Repository.RepositoryUri
