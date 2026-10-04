@@ -47,28 +47,27 @@ and deleting and recreating this one would hand out a fresh `*.cloudfront.net`
 domain — but that domain *is* the dev URL above. So the original stack stays
 exactly where it is; only its role has a name now.
 
-### Known drift: dev's app stack is a template version behind
+### Pin the AMI
 
-The dev *app* stack (`loopboard`) still runs the single-environment template, so
-it has no `EnvironmentName` and its `AppPath` still says `module_02_03`. Its CI
-stack is current, and the redeploy document repoints `/opt/loopboard/app` on
-every deploy, so **dev deploys correctly as it is** — the stale `AppPath` only
-matters at first boot.
+`LatestAmiId` resolves the newest Amazon Linux 2023 image from SSM, and it does
+so again on **every** stack update. Once AWS publishes a newer image, any update
+at all — even one that only adds a permission to the instance role — changes
+`ImageId`, and CloudFormation replaces the instance. Postgres's volume is on that
+instance's root disk, so the database goes with it.
 
-It matters if that instance is ever replaced: a fresh one would clone `main`,
-look for a directory that no longer exists, and fail its bootstrap. Bringing it
-up to date is:
+So each environment file sets `AmiId` to the image its instance was actually
+launched from, and the template uses that whenever it is set. A brand-new
+environment leaves it empty for the first deploy, then sets it to the new
+instance's `ImageId` before the next one:
 
 ```bash
-make deploy-dev
+aws ec2 describe-instances --instance-ids <id> --query 'Reservations[0].Instances[0].ImageId' --output text
 ```
 
-CloudFormation reports the resulting `UserData` change as a *conditional*
-instance recreation, but observed behaviour on this stack is an **in-place
-update of a running instance** — same instance id, same volume, same database.
-Which leads straight to the trap below.
-
-Prod was created from the current template and has no such drift.
+Always preview an app stack update and look for `Replacement: True` on
+`Instance` before applying it — `aws cloudformation deploy --no-execute-changeset`
+then `describe-change-set`. Moving to a newer AMI is then a deliberate
+replacement, done after a database backup, not a side effect.
 
 ### A stack update does not touch a running instance
 

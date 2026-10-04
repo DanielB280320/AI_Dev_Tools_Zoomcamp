@@ -40,7 +40,7 @@ Metadata:
       - Label: {default: Network}
         Parameters: [VpcId, SubnetId]
       - Label: {default: Instance}
-        Parameters: [InstanceType, LatestAmiId, SshAllowedCidr]
+        Parameters: [InstanceType, AmiId, LatestAmiId, SshAllowedCidr]
       - Label: {default: Site}
         Parameters: [DomainName, LetsEncryptEmail, HostedZoneId, SeedDemoData]
       - Label: {default: Source}
@@ -81,7 +81,19 @@ Parameters:
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
     Description: >-
       Resolved from the SSM public parameter, so a fresh deployment gets a
-      current Amazon Linux 2023 image rather than a hardcoded stale one.
+      current Amazon Linux 2023 image rather than a hardcoded stale one. Used
+      only while AmiId is empty — see there for why that is only at creation.
+
+  AmiId:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^ami-[0-9a-f]+$
+    Description: >-
+      The AMI the running instance was launched from, pinned. LatestAmiId is
+      re-resolved on every stack update, so once AWS publishes a newer Amazon
+      Linux image, any update at all — even one that only touches the role —
+      replaces the instance, and Postgres's volume with it. Empty only for a
+      brand-new stack; set it to the instance's ImageId right after.
 
   SshAllowedCidr:
     Type: String
@@ -168,6 +180,7 @@ Conditions:
     - !Equals [!Ref EnableCloudFront, "true"]
     - !Not [!Equals [!Ref CloudFrontOriginPrefixListId, ""]]
   HasSsh: !Not [!Equals [!Ref SshAllowedCidr, ""]]
+  HasPinnedAmi: !Not [!Equals [!Ref AmiId, ""]]
   HasDnsRecord: !And
     - !Not [!Equals [!Ref HostedZoneId, ""]]
     - !Not [!Equals [!Ref DomainName, ""]]
@@ -296,7 +309,7 @@ Resources:
         must:
           - IMDSv2 only, and the root volume encrypted.
     Properties:
-      ImageId: !Ref LatestAmiId
+      ImageId: !If [HasPinnedAmi, !Ref AmiId, !Ref LatestAmiId]
       InstanceType: !Ref InstanceType
       SubnetId: !Ref SubnetId
       SecurityGroupIds: [!Ref SecurityGroup]
