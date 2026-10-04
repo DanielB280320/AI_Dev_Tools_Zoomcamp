@@ -242,8 +242,10 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Session Manager, and pulling the app image from this project's one
-          ECR repository. Everything else the instance fetches is public.
+          Session Manager, pulling the app image from this project's one ECR
+          repository, and reading where to send telemetry (the SSM parameter
+          deploy/observability.cfn.yaml publishes). Everything else the
+          instance fetches is public.
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -268,6 +270,14 @@ Resources:
                   - ecr:BatchGetImage
                   - ecr:GetDownloadUrlForLayer
                 Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImageRepositoryName}"
+        - PolicyName: find-otlp-endpoint
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # The one parameter, a plain String; nothing secret is readable.
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/loopboard/observability/otlp-endpoint"
       Tags:
         - {Key: Name, Value: !Sub "${AWS::StackName}-role"}
         - {Key: Environment, Value: !Ref EnvironmentName}

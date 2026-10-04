@@ -5,6 +5,7 @@
 #   deploy/stack.sh prod
 #   deploy/stack.sh prod ci       # that environment's GitHub deploy user
 #   deploy/stack.sh registry      # the ECR repository both environments share
+#   deploy/stack.sh observability # the telemetry stack both environments send to
 #
 # Every input comes from deploy/environments/<env>.env, so a deploy is
 # reproducible from the repository rather than from whoever last ran it. The
@@ -35,10 +36,32 @@ if [[ $ENVIRONMENT == registry ]]; then
 	exit
 fi
 
+# Shared by both environments too, with its own parameter file.
+if [[ $ENVIRONMENT == observability ]]; then
+	# shellcheck source=/dev/null
+	source "$DEPLOY_DIR/environments/observability.env"
+	overrides=()
+	while read -r key; do
+		[[ $key == STACK_NAME ]] && continue
+		overrides+=("$key=${!key}")
+	done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$DEPLOY_DIR/environments/observability.env")
+	printf 'Deploying stack %s from observability.cfn.yaml\n' "$STACK_NAME"
+	printf '  %s\n' "${overrides[@]}"
+	aws cloudformation deploy \
+		--stack-name "$STACK_NAME" \
+		--template-file "$DEPLOY_DIR/observability.cfn.yaml" \
+		--capabilities CAPABILITY_IAM \
+		--tags "Application=loopboard" "Role=observability" \
+		--parameter-overrides "${overrides[@]}"
+	aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+		--query 'Stacks[0].Outputs' --output table
+	exit
+fi
+
 case $ENVIRONMENT in
 	dev | prod) ;;
 	*)
-		echo "usage: ${BASH_SOURCE[0]##*/} <dev|prod> [app|ci] | registry" >&2
+		echo "usage: ${BASH_SOURCE[0]##*/} <dev|prod> [app|ci] | registry | observability" >&2
 		exit 2
 		;;
 esac

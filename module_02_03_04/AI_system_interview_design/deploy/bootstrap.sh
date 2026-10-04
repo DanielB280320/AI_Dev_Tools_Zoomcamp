@@ -35,6 +35,25 @@ OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
 
 log() { printf '\n=== %s\n' "$*"; }
 
+# ------------------------------------------------------------------ telemetry --
+# An endpoint in deploy.env wins. Otherwise the observability stack's
+# Collector, if one is deployed: deploy/observability.cfn.yaml publishes its
+# private address as this SSM parameter. Absent, unreadable, or off AWS
+# altogether, telemetry stays off and the deploy carries on — monitoring is
+# never a reason for the app not to start.
+OTLP_PARAMETER=/loopboard/observability/otlp-endpoint
+if [[ -z $OTEL_EXPORTER_OTLP_ENDPOINT ]] && command -v aws >/dev/null; then
+	imds_token=$(curl -fsS --max-time 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+		http://169.254.169.254/latest/api/token 2>/dev/null || true)
+	if [[ -n $imds_token ]]; then
+		imds_region=$(curl -fsS --max-time 2 -H "X-aws-ec2-metadata-token: $imds_token" \
+			http://169.254.169.254/latest/meta-data/placement/region)
+		OTEL_EXPORTER_OTLP_ENDPOINT=$(aws ssm get-parameter --region "$imds_region" \
+			--name "$OTLP_PARAMETER" --query Parameter.Value --output text 2>/dev/null || true)
+	fi
+fi
+log "telemetry: ${OTEL_EXPORTER_OTLP_ENDPOINT:-off} (environment: ${LOOPBOARD_ENV:-unset})"
+
 # ------------------------------------------------------------------ packages --
 if ! command -v docker >/dev/null; then
 	log "installing docker"

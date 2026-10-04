@@ -1,0 +1,3 @@
+# Written on the deployed instance by deploy/observability-bootstrap.sh; holds
+# the Grafana admin password.
+.env

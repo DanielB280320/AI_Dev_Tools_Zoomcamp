@@ -83,7 +83,10 @@ receives, which is the quickest way to check whether the app is reaching it.
   `deployment.environment.name` alongside its defaults. Either way you can
   filter by environment or build without joining against `target_info`.
 - **Retention:** 7 days for Prometheus and Loki, and Tempo's default of 14 days.
-- **For a laptop, not a public address.** Grafana runs with anonymous admin
+- **Deployed:** the same files run on their own EC2 instance for dev and prod,
+  with a Grafana login and HTTPS through CloudFront
+  (`docker-compose.deploy.yaml`; [deploy/README.md, "Observability"](../deploy/README.md#observability)).
+- **This file's defaults are for a laptop, not a public address.** Grafana runs with anonymous admin
   access and no login form. Every UI port is bound to 127.0.0.1. Only OTLP
   listens on all interfaces, because an app container reaches it through
   `host.docker.internal`, and on Linux that's the Docker bridge, not loopback.

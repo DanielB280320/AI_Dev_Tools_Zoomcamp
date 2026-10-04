@@ -231,26 +231,23 @@ comes up at all, before anything has been pushed.
 
 ### Telemetry
 
-The app exports OpenTelemetry traces and metrics over OTLP/HTTP
-(`backend/app/telemetry.py`), but there is no collector yet, so it exports
-nothing until it is given an endpoint. Point it at one by adding to
-`/etc/loopboard/deploy.env` and re-running `bootstrap.sh`:
+Both environments send OpenTelemetry traces and metrics
+(`backend/app/telemetry.py`) to one shared observability stack: its own
+CloudFormation stack, `loopboard-observability`, on its own instance. See
+[Observability](#observability) below.
 
-```bash
-OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.example.com   # base URL; /v1/traces is appended
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <key>  # if the backend wants one
-```
-
-Not stack parameters: those are readable through the CloudFormation API, and
-the headers usually carry an API key. Each environment gets its own, so dev and
-prod can report to different places.
+`bootstrap.sh` finds the Collector by reading the SSM parameter
+`/loopboard/observability/otlp-endpoint`, which that stack publishes, so
+nothing about it is in `deploy.env`. To point one environment somewhere else,
+set `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS`, if the
+backend wants an API key) in `/etc/loopboard/deploy.env`. That takes precedence
+over the parameter. Without either, telemetry is off and the app runs as
+before.
 
 Every span and metric names its environment (`deployment.environment.name`,
-from `LOOPBOARD_ENV` in the same file) and its build (`vcs.ref.head.revision`,
-the commit CI baked into the image — so a promoted image reports the same
-commit on prod as it did on dev). An instance launched before the dev/prod
-split has no `LOOPBOARD_ENV` line and reports `local`; add
-`LOOPBOARD_ENV=dev` there along with the endpoint.
+from `LOOPBOARD_ENV` in `deploy.env`) and its build (`vcs.ref.head.revision`,
+the commit CI baked into the image). A promoted image reports the same commit
+on prod as it did on dev.
 
 **Back up** the database, which is the only state worth keeping:
 
@@ -258,6 +255,60 @@ split has no `LOOPBOARD_ENV` line and reports `local`; add
 sudo docker compose -f docker-compose.prod.yaml exec -T db \
   pg_dump -U loopboard loopboard | gzip > loopboard-$(date +%F).sql.gz
 ```
+
+## Observability
+
+```
+dev instance  ─┐  OTLP/HTTP :4318, inside the VPC        ┌─ Tempo       (traces)
+               ├────────────────────────────▶ Collector ─┼─ Prometheus  (metrics)
+prod instance ─┘  (security group: these two only)       └─ Loki        (logs)
+                                                                 │
+browser ──HTTPS──▶ CloudFront ──▶ :80 Grafana ◀──────────────────┘
+```
+
+| | |
+| --- | --- |
+| Stack | `loopboard-observability` (`observability.cfn.yaml`, parameters in `environments/observability.env`) |
+| Grafana | the stack's `GrafanaUrl` output; sign in as `admin` |
+| Password | `aws ssm get-parameter --with-decryption --name /loopboard-observability/grafana-admin-password --query Parameter.Value --output text` |
+| OTLP endpoint | SSM `/loopboard/observability/otlp-endpoint` (the instance's private address) |
+| Deploy | `make deploy-observability` |
+
+It's the same `observability/docker-compose.yaml` that runs locally, plus
+`observability/docker-compose.deploy.yaml`. The overlay turns Grafana's login
+on, publishes Grafana on port 80 for CloudFront, and caps container logs.
+`deploy/observability-bootstrap.sh` brings it up, generates the Grafana
+password on first run and copies it to SSM.
+
+**Separate from the app stacks.** It shares no instance, volume or address with
+either environment. Its security group accepts Grafana traffic from
+CloudFront's edge and OTLP from the two app security groups, and nothing else.
+Prometheus, Loki and Tempo aren't reachable from outside the instance. If it's
+down or deleted, the apps keep running: the exporter drops what it can't send.
+
+**One stack for both environments.** In Grafana, the *Environment* selector on
+the Loopboard dashboard, or `deployment_environment_name` in a query, tells dev
+from prod.
+
+**Changing it:**
+
+```bash
+# observability/ changed: pull and re-run on the instance
+aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript \
+  --parameters 'commands=["cd /opt/loopboard/repo && git pull --ff-only","/opt/loopboard/app/deploy/observability-bootstrap.sh"]'
+# the template or its parameters changed
+make deploy-observability
+```
+
+Its AMI is pinned in `environments/observability.env` for the same reason as
+the app's (see [Pin the AMI](#pin-the-ami)). Telemetry is kept on the
+instance's root volume (Prometheus and Loki keep 7 days, Tempo 14), so
+replacing the instance starts it empty. Dashboards and datasources come back,
+because they're provisioned from the repository.
+
+**If an app stack is recreated,** its security group changes. Update
+`DevAppSecurityGroupId` / `ProdAppSecurityGroupId` in `observability.env` and
+run `make deploy-observability`, or the new instance's telemetry is refused.
 
 ## CI/CD
 
@@ -455,8 +506,9 @@ No load balancer, no NAT gateway, no managed database — the three line items
 that usually dominate a small deployment.
 
 Two environments is therefore about **$42/month**, plus under $1/month for the
-images ECR keeps (up to 50 at roughly 115 MB, $0.10/GB-month): **about $43** in
-all. Every resource carries an `Environment` tag, so Cost Explorer can split the
+images ECR keeps (up to 50 at roughly 115 MB, $0.10/GB-month), and the same
+$21 again for the observability stack, which is one more t3.small with its own
+Elastic IP, volume and distribution: **about $64** in all. Every resource carries an `Environment` tag, so Cost Explorer can split the
 bill between them once the tag is activated as a cost allocation tag (Billing ▸
 Cost allocation tags).
 
@@ -478,6 +530,13 @@ the $15 instance and nothing else. To delete one outright, database and all:
 ```bash
 aws cloudformation delete-stack --stack-name loopboard-prod
 aws cloudformation delete-stack --stack-name loopboard-prod-github-deploy
+```
+
+The observability stack goes on its own, with every trace, metric and log in
+it; the apps carry on without it:
+
+```bash
+aws cloudformation delete-stack --stack-name loopboard-observability
 ```
 
 The ECR repository is shared, so it goes only once both environments have:

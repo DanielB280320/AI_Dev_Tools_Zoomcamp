@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Loopboard's observability stack on its own EC2 instance: an OpenTelemetry
+  Collector in front of Prometheus, Loki and Tempo, with Grafana served over
+  HTTPS through CloudFront. Separate from the app stacks: both the dev and the
+  prod app instance send OTLP to it over the VPC, and it shares nothing with
+  either beyond that one port. The OTLP endpoint is published as an SSM
+  parameter, which the app's bootstrap.sh reads.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    why: >-
+      The same observability/docker-compose.yaml that runs on a laptop, plus
+      docker-compose.deploy.yaml for what a public address needs. One instance
+      for both environments: telemetry is labelled with
+      deployment.environment.name, so one Grafana filters dev from prod, and a
+      second stack would double the cost of an account on credits.
+    must:
+      - >-
+        Only Grafana is public, and only through CloudFront. OTLP is open to
+        the two app security groups, never to an address range.
+      - >-
+        The Grafana admin password is generated on the instance, never a stack
+        parameter; parameters are readable through the CloudFormation API.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: Network}
+        Parameters: [VpcId, SubnetId, CloudFrontOriginPrefixListId]
+      - Label: {default: Senders}
+        Parameters: [DevAppSecurityGroupId, ProdAppSecurityGroupId]
+      - Label: {default: Instance}
+        Parameters: [InstanceType, AmiId, LatestAmiId]
+      - Label: {default: Source}
+        Parameters: [RepoUrl, RepoBranch, AppPath]
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC the app instances are in; OTLP travels inside it.
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A public subnet in that VPC. The instance pulls images from Docker Hub
+      and is CloudFront's origin, so it needs a route to the internet.
+
+  CloudFrontOriginPrefixListId:
+    Type: String
+    AllowedPattern: ^pl-[0-9a-f]+$
+    Description: >-
+      com.amazonaws.global.cloudfront.origin-facing for this Region
+      (pl-b6a144df in us-east-2). Grafana's port accepts nothing else.
+
+  DevAppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: The dev app stack's SecurityGroup, allowed to send OTLP.
+
+  ProdAppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: The prod app stack's SecurityGroup, allowed to send OTLP.
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium, c7i-flex.large, m7i-flex.large]
+    Description: >-
+      t3.small (2 GiB, plus 2 GiB of swap) carries two low-traffic
+      environments; the free plan allows it, and not t3.medium.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Used only while AmiId is empty, i.e. at creation.
+
+  AmiId:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^ami-[0-9a-f]+$
+    Description: >-
+      The AMI the running instance was launched from, pinned after creation
+      for the reason the app template gives: LatestAmiId re-resolves on every
+      update and would replace the instance, and its stored telemetry with it.
+
+  RepoUrl:
+    Type: String
+    Default: https://github.com/DanielB280320/AI_Dev_Tools_Zoomcamp.git
+
+  RepoBranch:
+    Type: String
+    Default: main
+
+  AppPath:
+    Type: String
+    Default: module_02_03_04/AI_system_interview_design
+
+Conditions:
+  HasPinnedAmi: !Not [!Equals [!Ref AmiId, ""]]
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Two ways in and no more: Grafana from CloudFront's edge, OTLP from
+          the two app instances. Attached to this stack's instance only.
+        must:
+          - No CIDR ingress. The prefix list and the two group references are the whole list.
+          - >-
+            One prefix-list rule only: a rule naming a prefix list costs its
+            MaxEntries against the 60-rules quota, and a second one exceeds it.
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName}: Grafana from CloudFront, OTLP from the app instances"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, SourcePrefixListId: !Ref CloudFrontOriginPrefixListId, Description: "Grafana, from CloudFront edge locations only"}
+        - {IpProtocol: tcp, FromPort: 4318, ToPort: 4318, SourceSecurityGroupId: !Ref DevAppSecurityGroupId, Description: "OTLP/HTTP from the dev app instance"}
+        - {IpProtocol: tcp, FromPort: 4318, ToPort: 4318, SourceSecurityGroupId: !Ref ProdAppSecurityGroupId, Description: "OTLP/HTTP from the prod app instance"}
+      SecurityGroupEgress:
+        - {IpProtocol: -1, CidrIp: 0.0.0.0/0, Description: "Package and image pulls"}
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-sg"}
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Session Manager, and writing the generated Grafana password to its
+          one SecureString parameter so an operator can read it without a shell.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: store-grafana-password
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:PutParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/grafana-admin-password"
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-role"}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          CloudFront's origin is a hostname derived from this address, so it
+          has to survive a stop/start. Public IPv4 is billed attached or not.
+    Properties:
+      Domain: vpc
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-eip"}
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Clones the repository and hands off to
+          deploy/observability-bootstrap.sh. Telemetry lives on the root
+          volume, so replacing the instance starts it empty; the dashboards
+          and datasources are provisioned from the repository and come back.
+        must:
+          - IMDSv2 only, and the root volume encrypted.
+    Properties:
+      ImageId: !If [HasPinnedAmi, !Ref AmiId, !Ref LatestAmiId]
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref SecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}"}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee /var/log/loopboard-observability-bootstrap.log) 2>&1
+          set -x
+
+          WAIT_HANDLE='${BootstrapWaitHandle}'
+
+          install -d -m 700 /etc/loopboard-observability
+          cat > /etc/loopboard-observability/deploy.env <<'EOF_ENV'
+          GRAFANA_ROOT_URL=https://${Distribution.DomainName}/
+          GRAFANA_PASSWORD_PARAMETER=/${AWS::StackName}/grafana-admin-password
+          EOF_ENV
+
+          dnf install -y git
+          install -d /opt/loopboard
+          if [ -d /opt/loopboard/repo/.git ]; then
+            git -C /opt/loopboard/repo pull --ff-only
+          else
+            git clone --depth 1 --branch ${RepoBranch} ${RepoUrl} /opt/loopboard/repo
+          fi
+          ln -sfn /opt/loopboard/repo/${AppPath} /opt/loopboard/app
+
+          STATUS=FAILURE
+          REASON='bootstrap failed - see /var/log/loopboard-observability-bootstrap.log on the instance'
+          if /opt/loopboard/app/deploy/observability-bootstrap.sh; then
+            STATUS=SUCCESS
+            REASON='observability stack is up'
+          fi
+
+          cat > /tmp/signal.json <<EOF_SIGNAL
+          {"Status":"${!STATUS}","Reason":"${!REASON}","UniqueId":"bootstrap","Data":"/var/log/loopboard-observability-bootstrap.log"}
+          EOF_SIGNAL
+          curl -fsS -X PUT -H 'Content-Type:' --data-binary @/tmp/signal.json "${!WAIT_HANDLE}"
+
+  BootstrapWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  BootstrapWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: Instance
+    Properties:
+      Handle: !Ref BootstrapWaitHandle
+      # Five image pulls and the health checks; nothing is built here.
+      Timeout: "1200"
+      Count: 1
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          HTTPS for Grafana on a *.cloudfront.net name, as the app stacks do.
+          Created before the instance (no DependsOn on it) so UserData can
+          hand Grafana its own public URL; CloudFront does not resolve the
+          origin until a request arrives.
+        must:
+          - Caching disabled and every header forwarded; Grafana is an app, not assets.
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} — Grafana"
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: grafana
+            DomainName: !Join
+              - ""
+              - - "ec2-"
+                - !Join ["-", !Split [".", !Ref ElasticIp]]
+                - "."
+                - !Ref AWS::Region
+                - ".compute.amazonaws.com"
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginSSLProtocols: [TLSv1.2]
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: grafana
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          # Managed-CachingDisabled and Managed-AllViewer.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          Compress: true
+      Tags:
+        - {Key: Name, Value: !Sub "${AWS::StackName}-cdn"}
+
+  OtlpEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          How the app instances find the Collector: bootstrap.sh reads this
+          when deploy.env sets no endpoint of its own. A private address, so
+          the traffic never leaves the VPC; it is fixed for the life of the
+          instance and this parameter follows a replacement.
+        must:
+          - The name is what the app stacks' instance roles may read; renaming it breaks them.
+    Properties:
+      Name: /loopboard/observability/otlp-endpoint
+      Type: String
+      Value: !Sub "http://${Instance.PrivateIp}:4318"
+      Description: OTLP/HTTP base URL of the Loopboard observability Collector
+
+Outputs:
+  GrafanaUrl:
+    Description: Grafana, over HTTPS. Sign in as admin.
+    Value: !Sub "https://${Distribution.DomainName}"
+
+  GrafanaPasswordCommand:
+    Description: Read the generated Grafana admin password.
+    Value: !Sub "aws ssm get-parameter --with-decryption --name /${AWS::StackName}/grafana-admin-password --query Parameter.Value --output text"
+
+  OtlpEndpoint:
+    Description: Where the app instances send telemetry (inside the VPC only).
+    Value: !GetAtt OtlpEndpointParameter.Value
+
+  ShellCommand:
+    Description: A shell on the instance without an open SSH port.
+    Value: !Sub "aws ssm start-session --target ${Instance} --region ${AWS::Region}"
+
+  RedeployCommand:
+    Description: Pull the repository and re-run the bootstrap, on the instance.
+    Value: "cd /opt/loopboard/repo && sudo git pull --ff-only && sudo /opt/loopboard/app/deploy/observability-bootstrap.sh"

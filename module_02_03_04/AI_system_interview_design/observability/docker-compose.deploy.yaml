@@ -1,0 +1,52 @@
+# The observability stack as deployed on its own EC2 instance
+# (deploy/observability.cfn.yaml), layered over docker-compose.yaml:
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.deploy.yaml up -d --wait
+#
+# `deploy/observability-bootstrap.sh` runs exactly that. What changes from the
+# laptop version is what a public address demands:
+#
+#   * Grafana requires a login. The admin password is generated on the
+#     instance (and kept in SSM Parameter Store), never in this repository.
+#   * Grafana answers on the host's port 80, which the security group opens to
+#     CloudFront's edge only; the distribution is the HTTPS front door.
+#   * OTLP stays on 4317/4318, which the security group opens to the dev and
+#     prod app instances only. Prometheus, Loki and Tempo publish nothing
+#     beyond the instance's loopback.
+#   * Container logs are capped; the default json-file driver grows without
+#     limit, and the Collector's debug exporter logs every batch.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  otel-collector:
+    logging: *logging
+
+  prometheus:
+    logging: *logging
+
+  loki:
+    logging: *logging
+
+  tempo:
+    logging: *logging
+
+  grafana:
+    logging: *logging
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_SECURITY_ADMIN_USER: admin
+      # Applied when Grafana first creates its database; changing it later
+      # means `grafana cli admin reset-admin-password` (deploy/README.md).
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Served over HTTPS by CloudFront, so the session cookie can insist on it.
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-}
+    ports:
+      - "80:3000"
