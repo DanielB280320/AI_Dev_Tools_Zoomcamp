@@ -267,14 +267,13 @@ headers, the stream also accepts `?token=…`.
 OpenTelemetry traces and metrics, exported over OTLP/HTTP — off until
 `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Every request is a server span with its SQL
 statements as children, plus the `http.server.*` and `db.client.connections.*`
-metrics; `/health` is not traced. To see it locally:
+metrics; `/health` is not traced. To see it locally, start the Collector,
+Prometheus, Loki, Tempo and Grafana stack in [`../observability/`](../observability/README.md):
 
 ```bash
-docker run -d -p 16686:16686 -p 4318:4318 jaegertracing/jaeger:latest
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make api   # traces at :16686
+make obs-up
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make api   # Grafana at :3000
 ```
-
-Jaeger shows the traces; the metrics need a backend that stores them.
 
 | Variable | Resource attribute | Default |
 | --- | --- | --- |

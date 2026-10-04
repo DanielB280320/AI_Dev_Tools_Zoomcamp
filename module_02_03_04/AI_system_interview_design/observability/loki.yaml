@@ -1,0 +1,59 @@
+# Loki, single process, everything on local disk under /loki (a volume).
+#
+# Logs arrive as OTLP from the Collector at /otlp. Loki turns a handful of
+# resource attributes into index labels and stores the rest as structured
+# metadata, which is queryable but not indexed:
+#   {service_name="loopboard-api", deployment_environment_name="prod"}
+#     | vcs_ref_head_revision="83242da…"
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Required for OTLP ingestion: everything that is not a label is kept as
+  # structured metadata.
+  allow_structured_metadata: true
+  retention_period: 168h # 7 days, like Prometheus
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+distributor:
+  otlp_config:
+    # `deployment.environment.name` is not on Loki's default label list
+    # (only the deprecated `deployment.environment` is); this makes it one,
+    # so filtering by environment uses the index rather than a scan.
+    default_resource_attributes_as_index_labels:
+      - service.name
+      - service.namespace
+      - deployment.environment.name
+
+analytics:
+  reporting_enabled: false

@@ -49,6 +49,14 @@ services:
       # Tables are created and the demo data seeded on the first start against
       # an empty database. Set to 0 to skip the seeding.
       LOOPBOARD_SEED: "1"
+      # Telemetry is off unless this is set. With the observability stack up
+      # (observability/, a separate Compose project), its Collector is on the
+      # host:  OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318 make up
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    # Docker Desktop defines host.docker.internal already; plain Linux Docker
+    # needs it mapped.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     depends_on:

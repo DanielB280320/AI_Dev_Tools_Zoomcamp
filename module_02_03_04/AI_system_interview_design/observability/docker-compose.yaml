@@ -1,0 +1,128 @@
+# The telemetry stack, as its own Compose project: an OpenTelemetry Collector
+# in front of Prometheus (metrics), Loki (logs) and Tempo (traces), and Grafana
+# over all three.
+#
+#   docker compose -f observability/docker-compose.yaml up -d --wait
+#   docker compose -f observability/docker-compose.yaml down       # keeps the data
+#   docker compose -f observability/docker-compose.yaml down -v    # wipes it
+#
+# (`make obs-up` / `make obs-down` from the repository root.) Then open Grafana
+# at http://localhost:3000 — no sign-in.
+#
+# Separate from the application stack on purpose: either starts, stops and
+# wipes without touching the other, and the app neither knows nor cares what
+# sits behind the Collector. The only thing joining them is the Collector's
+# OTLP port on the host:
+#
+#   app on the host (`make api`)     OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+#   app in Docker (`make up`)        OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
+#
+#   app ──OTLP──▶ otel-collector ──┬─ traces  ─▶ tempo      ─┐
+#                                  ├─ metrics ─▶ prometheus ─┼─▶ grafana
+#                                  └─ logs    ─▶ loki       ─┘
+#
+# Every backend takes OTLP natively, so the Collector forwards rather than
+# translates, and the resource attributes the app stamps on everything
+# (service, environment, commit) arrive intact.
+#
+# Built for a laptop: anonymous admin in Grafana, local-disk storage, a single
+# instance of each. Not something to put on a public address as it stands.
+
+name: loopboard-observability
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      # OTLP, the one way in. On every interface rather than 127.0.0.1 so an
+      # app container reaches it through `host.docker.internal`, which on
+      # Linux is the bridge's address, not loopback.
+      - "4317:4317" # gRPC
+      - "4318:4318" # HTTP — what the Loopboard backend speaks
+    # Started, not healthy: Loki and Tempo are distroless images with nothing
+    # to probe them with, and the Collector queues and retries an export to a
+    # backend that is still starting anyway.
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      # Metrics arrive pushed, as OTLP from the Collector, not scraped.
+      - --web.enable-otlp-receiver
+      # Exemplars link a latency bucket to a trace that landed in it.
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.7.8
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:3.1.0
+    command: ["-target=all", "-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    environment:
+      # A local tool: straight in, as an admin, no login form.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      # Datasources only: mounting all of provisioning/ would hide the image's
+      # empty dashboards/, alerting/ and plugins/ directories, and Grafana logs
+      # an error for each one it cannot find.
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  grafana-data:

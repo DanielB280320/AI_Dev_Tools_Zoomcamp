@@ -1,0 +1,37 @@
+# Prometheus: metrics arrive as OTLP pushes from the Collector
+# (`--web.enable-otlp-receiver` in docker-compose.yaml); the only scrapes are
+# of the stack itself.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+otlp:
+  # OTLP puts service, environment and commit on the resource, not on each
+  # data point, and Prometheus keeps only `service.name` (as `job`) and
+  # `service.instance.id` (as `instance`) by default. Promoted, they are
+  # ordinary labels — `http_server_duration_milliseconds_count{
+  # deployment_environment_name="prod"}` — rather than a join against
+  # `target_info`.
+  promote_resource_attributes:
+    - service.name
+    - service.version
+    - deployment.environment.name
+    - vcs.ref.head.revision
+
+storage:
+  # Pushed points can arrive late or out of order (a batch retried after a
+  # backend restart); without a window Prometheus drops them.
+  tsdb:
+    out_of_order_time_window: 30m
+
+scrape_configs:
+  # The Collector's own pipeline metrics: what it accepted, refused and failed
+  # to send, per signal.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

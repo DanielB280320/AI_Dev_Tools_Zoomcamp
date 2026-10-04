@@ -1,0 +1,76 @@
+# OpenTelemetry Collector: OTLP in, one backend per signal out.
+#
+# Every backend here accepts OTLP itself, so the Collector does no format
+# conversion. What it buys is one address for the app to send everything to,
+# batching and retries in front of backends that can restart independently,
+# and one place to add sampling, filtering or a second destination later
+# without touching the app.
+
+receivers:
+  otlp:
+    protocols:
+      # 0.0.0.0: the Collector's default is localhost, which inside a
+      # container means nothing outside the container can reach it.
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # First in every pipeline: refuses data rather than letting the process be
+  # OOM-killed when a backend is down and the queues back up.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  batch: {}
+
+exporters:
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Prometheus's native OTLP endpoint (`--web.enable-otlp-receiver`).
+  otlp_http/prometheus:
+    endpoint: http://prometheus:9090/api/v1/otlp
+    tls:
+      insecure: true
+
+  # Loki's native OTLP endpoint; resource attributes become labels or
+  # structured metadata per the `otlp_config` in loki.yaml.
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  # `docker compose logs otel-collector` shows a line per batch received —
+  # the quickest check that the app is reaching the Collector at all. Set
+  # `verbosity: detailed` to see every span.
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/tempo, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http/prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http/loki, debug]
+  telemetry:
+    # The Collector's own metrics, scraped by Prometheus (prometheus.yaml):
+    # accepted vs refused vs failed-to-send, per pipeline.
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

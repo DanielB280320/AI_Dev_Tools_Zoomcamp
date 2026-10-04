@@ -44,7 +44,7 @@ CREDS ?= 1
 
 .PHONY: help install install-api install-web api web dev test smoke lint format creds docs health db-reset clean \
 	db-up db-down db-psql db-wait api-pg test-pg db-reset-pg \
-	up down logs e2e e2e-local install-e2e \
+	up down logs e2e e2e-local install-e2e obs-up obs-down obs-logs \
 	deploy-dev deploy-prod deploy-ci-dev deploy-ci-prod deploy-registry
 
 help: ## List the available targets
@@ -100,6 +100,20 @@ down: ## Stop the compose stack (the database volume survives)
 
 logs: ## Follow the app container's logs
 	$(COMPOSE) logs -f app
+
+# The observability stack is its own Compose project; see observability/README.md.
+OBS := docker compose -f observability/docker-compose.yaml
+
+obs-up: ## Start the telemetry stack (Collector, Prometheus, Loki, Tempo, Grafana on :3000)
+	$(OBS) up -d --wait
+	@echo "Grafana: http://localhost:3000   OTLP: http://localhost:4318"
+	@echo "Send the API's telemetry there:  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make api"
+
+obs-down: ## Stop the telemetry stack (its data survives in volumes)
+	$(OBS) down
+
+obs-logs: ## Follow the Collector's logs (a line per batch it receives)
+	$(OBS) logs -f otel-collector
 
 install-e2e: ## Install the end-to-end suite's dependencies (npm)
 	cd $(E2E) && npm install

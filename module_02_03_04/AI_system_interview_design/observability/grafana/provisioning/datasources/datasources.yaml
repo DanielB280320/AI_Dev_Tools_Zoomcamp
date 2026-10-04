@@ -1,0 +1,64 @@
+# The three backends, wired to each other so a signal leads to the others:
+#   trace span   ─▶ that trace's logs (Loki) and its service's metrics (Prometheus)
+#   log line     ─▶ the trace it was written under (Tempo)
+#   metric point ─▶ an exemplar trace that landed in that bucket (Tempo)
+#
+# Fixed UIDs, because the links between them are by UID.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      derivedFields:
+        # OTLP logs carry the trace id as structured metadata, not in the line.
+        - name: TraceID
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          url: "$${__value.raw}"
+          urlDisplayLabel: View trace
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        filterByTraceID: true
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        tags:
+          - key: service.name
+            value: service_name
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        tags:
+          - key: service.name
+            value: job
+        queries:
+          - name: Request rate
+            query: sum(rate(http_server_duration_milliseconds_count{$$__tags}[1m]))
+      lokiSearch:
+        datasourceUid: loki
+      nodeGraph:
+        enabled: true
