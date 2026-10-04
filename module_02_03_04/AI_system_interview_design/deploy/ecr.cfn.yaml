@@ -37,8 +37,8 @@ Parameters:
     Default: 50
     MinValue: 10
     Description: >-
-      Newest tagged images kept; older ones expire. Each is about 200 MB, so
-      fifty is about 10 GB, roughly $1/month.
+      Newest tagged images kept; older ones expire. Each is about 115 MB, so
+      fifty is under 6 GB, roughly $0.60/month.
 
 Resources:
   Repository:

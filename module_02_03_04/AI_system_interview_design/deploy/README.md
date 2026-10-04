@@ -419,20 +419,38 @@ the Free plan that cannot be lifted.
 
 ## Cost
 
-About **$18/month per environment** in us-east-2: t3.small on-demand (~$15),
-30 GiB gp3 (~$2.40), CloudFront's first TB free then cents at this traffic, and
-the Elastic IP free while attached to a running instance. No load balancer, no
-NAT gateway, no managed database — the three line items that usually dominate a
-small deployment.
+About **$21/month per environment** in us-east-2, at on-demand list prices:
 
-Two environments is therefore about **$36/month**, plus about $1/month for the
-images ECR keeps (50 at roughly 200 MB, $0.10/GB-month). Every resource carries an
-`Environment` tag, so Cost Explorer can split the bill between them once the tag
-is activated as a cost allocation tag (Billing ▸ Cost allocation tags).
+| Item | Per month |
+| --- | --- |
+| t3.small, running around the clock | $15.18 |
+| Elastic IP — a public IPv4 address, billed at $0.005/hour whether attached or not | $3.65 |
+| 30 GiB gp3 root volume | $2.40 |
+| CloudFront — the first TB and 10M requests a month are free | ~$0 |
+
+No load balancer, no NAT gateway, no managed database — the three line items
+that usually dominate a small deployment.
+
+Two environments is therefore about **$42/month**, plus under $1/month for the
+images ECR keeps (up to 50 at roughly 115 MB, $0.10/GB-month): **about $43** in
+all. Every resource carries an `Environment` tag, so Cost Explorer can split the
+bill between them once the tag is activated as a cost allocation tag (Billing ▸
+Cost allocation tags).
+
+On the Free plan this is drawn from the plan's credits rather than billed, so
+Cost Explorer shows close to $0. What is left, and when the plan ends:
+
+```bash
+aws freetier get-account-plan-state
+```
+
+The account closes when the credits run out or the plan expires, whichever
+comes first, unless it is upgraded to the paid plan (AWS Settings ▸ Billing) —
+and both environments go with it.
 
 To stop paying for one without losing it, stop its instance — the volume and the
-Elastic IP survive, and the EIP starts costing about $3.60/month while detached
-from a running instance. To delete one outright, database and all:
+Elastic IP survive, and keep costing about $6/month between them. That saves
+the $15 instance and nothing else. To delete one outright, database and all:
 
 ```bash
 aws cloudformation delete-stack --stack-name loopboard-prod
