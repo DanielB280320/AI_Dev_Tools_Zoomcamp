@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import create_engine, event
+from sqlalchemy import event
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -121,7 +121,9 @@ def get_engine() -> Engine:
     global _engine, _new_session
     if _engine is None:
         url = settings.database_url
-        _engine = create_engine(url, **engine_options(url))
+        # `sa.create_engine`, looked up now rather than imported by name, so
+        # the wrapper `app.telemetry` installs on it is the one called.
+        _engine = sa.create_engine(url, **engine_options(url))
         if _is_sqlite(url):
             _tune_sqlite(_engine)
         _new_session = sessionmaker(bind=_engine, expire_on_commit=False)

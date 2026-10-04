@@ -40,6 +40,9 @@ services:
       # The Dockerfile and the sources it copies are one level up.
       context: ..
       dockerfile: Dockerfile
+      # Only for that local build; a pulled image has its commit baked in.
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
     environment:
       LOOPBOARD_DATABASE_URL: postgresql://loopboard:${POSTGRES_PASSWORD}@db:5432/loopboard
       # Off by default here: the seeded interviewers share one published
@@ -50,6 +53,12 @@ services:
       # origin and CORS never comes into it. Set anyway, so a separately
       # hosted frontend is a one-line change rather than a debugging session.
       LOOPBOARD_CORS_ORIGINS: ${APP_ORIGIN:-}
+      # Telemetry (backend/app/telemetry.py): `dev` or `prod`, stamped on
+      # every span and metric. Nothing is exported until an OTLP endpoint is
+      # set in /etc/loopboard/deploy.env (deploy/README.md, "Telemetry").
+      LOOPBOARD_ENV: ${LOOPBOARD_ENV:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
     # Published to the compose network only; Caddy owns the host's ports.
     expose:
       - "8000"

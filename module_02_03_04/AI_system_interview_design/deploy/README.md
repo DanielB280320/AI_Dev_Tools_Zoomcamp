@@ -229,6 +229,29 @@ Before its first CI deploy an instance has no recorded image, and
 `bootstrap.sh` builds one from the checkout instead — that is how a fresh stack
 comes up at all, before anything has been pushed.
 
+### Telemetry
+
+The app exports OpenTelemetry traces and metrics over OTLP/HTTP
+(`backend/app/telemetry.py`), but there is no collector yet, so it exports
+nothing until it is given an endpoint. Point it at one by adding to
+`/etc/loopboard/deploy.env` and re-running `bootstrap.sh`:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.example.com   # base URL; /v1/traces is appended
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <key>  # if the backend wants one
+```
+
+Not stack parameters: those are readable through the CloudFormation API, and
+the headers usually carry an API key. Each environment gets its own, so dev and
+prod can report to different places.
+
+Every span and metric names its environment (`deployment.environment.name`,
+from `LOOPBOARD_ENV` in the same file) and its build (`vcs.ref.head.revision`,
+the commit CI baked into the image — so a promoted image reports the same
+commit on prod as it did on dev). An instance launched before the dev/prod
+split has no `LOOPBOARD_ENV` line and reports `local`; add
+`LOOPBOARD_ENV=dev` there along with the endpoint.
+
 **Back up** the database, which is the only state worth keeping:
 
 ```bash

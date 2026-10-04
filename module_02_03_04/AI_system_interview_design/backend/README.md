@@ -262,6 +262,29 @@ run left behind. Start empty instead with `LOOPBOARD_SEED=0`, or wipe the file w
 session. A `: keepalive` comment goes out every ~20 s. Because `EventSource` cannot set
 headers, the stream also accepts `?token=…`.
 
+## Telemetry
+
+OpenTelemetry traces and metrics, exported over OTLP/HTTP — off until
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. Every request is a server span with its SQL
+statements as children, plus the `http.server.*` and `db.client.connections.*`
+metrics; `/health` is not traced. To see it locally:
+
+```bash
+docker run -d -p 16686:16686 -p 4318:4318 jaegertracing/jaeger:latest
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make api   # traces at :16686
+```
+
+Jaeger shows the traces; the metrics need a backend that stores them.
+
+| Variable | Resource attribute | Default |
+| --- | --- | --- |
+| `OTEL_SERVICE_NAME` | `service.name` | `loopboard-api` |
+| `LOOPBOARD_ENV` | `deployment.environment.name` | `local` |
+| `LOOPBOARD_GIT_COMMIT` | `vcs.ref.head.revision` | omitted (the Dockerfile's `GIT_COMMIT` build arg sets it) |
+
+The rest of the standard `OTEL_*` variables (headers, sampler, export interval,
+`OTEL_RESOURCE_ATTRIBUTES`) are read as usual. See `app/telemetry.py`.
+
 ## Known limits
 
 * **The SSE broker is still in-process, which is what actually caps this at one

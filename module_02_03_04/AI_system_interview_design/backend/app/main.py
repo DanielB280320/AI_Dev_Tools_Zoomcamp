@@ -17,6 +17,7 @@ from .db import bootstrap_lock, check_connection, init_db, safe_url
 from .errors import ApiError, register_error_handlers
 from .seed import seed
 from .store import store
+from .telemetry import setup_telemetry
 
 DESCRIPTION = """
 Backend for Loopboard, the system design interview platform — the server side of
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     )
 
     register_error_handlers(app)
+    setup_telemetry(app)
 
     app.include_router(routers.auth.router)
     app.include_router(routers.sessions.router)

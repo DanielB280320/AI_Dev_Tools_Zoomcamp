@@ -63,5 +63,13 @@ ENV PATH="/app/.venv/bin:$PATH" \
     LOOPBOARD_DATABASE_URL=sqlite:////data/loopboard.db
 VOLUME /data
 
+# The commit this image was built from, reported on every span and metric as
+# `vcs.ref.head.revision` (backend/app/telemetry.py). Baked in rather than set
+# at deploy time, because the same image is promoted from dev to prod: the
+# commit is a fact about the image, not about where it runs. Last, so a new
+# commit invalidates no layer above it.
+ARG GIT_COMMIT=""
+ENV LOOPBOARD_GIT_COMMIT=$GIT_COMMIT
+
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

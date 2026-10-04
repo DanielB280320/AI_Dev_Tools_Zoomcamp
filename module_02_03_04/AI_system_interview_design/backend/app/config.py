@@ -127,6 +127,15 @@ class Settings:
     #: The frontend's static build (`dist/client`) to serve alongside the API.
     #: Unset, the API serves no pages — the frontend runs on its own dev server.
     static_dir: str = field(default_factory=lambda: _str("LOOPBOARD_STATIC_DIR", ""))
+    # Telemetry (`app/telemetry.py`). The OTLP endpoint is read under its
+    # standard name, the one every OpenTelemetry exporter already knows.
+    #: Unset, nothing is exported and nothing is instrumented.
+    otlp_endpoint: str = field(default_factory=lambda: _str("OTEL_EXPORTER_OTLP_ENDPOINT", ""))
+    service_name: str = field(default_factory=lambda: _str("OTEL_SERVICE_NAME", "loopboard-api"))
+    #: Which deployment this is: `dev` or `prod` from the stack, `local` otherwise.
+    environment: str = field(default_factory=lambda: _str("LOOPBOARD_ENV", "local"))
+    #: The commit the running image was built from; the Dockerfile sets it.
+    git_commit: str = field(default_factory=lambda: _str("LOOPBOARD_GIT_COMMIT", ""))
     cors_origins: list[str] = field(
         default_factory=lambda: _csv(
             "LOOPBOARD_CORS_ORIGINS",
