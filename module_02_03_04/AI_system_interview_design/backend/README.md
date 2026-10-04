@@ -272,8 +272,12 @@ Prometheus, Loki, Tempo and Grafana stack in [`../observability/`](../observabil
 
 ```bash
 make obs-up
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make api   # Grafana at :3000
+make api-obs     # Grafana at :3000; the "Loopboard" dashboard shows app/metrics.py
 ```
+
+On top of that are three product metrics (`app/metrics.py`): interview rooms
+created, people in a live room right now (by role), and canvas elements created
+(by type).
 
 | Variable | Resource attribute | Default |
 | --- | --- | --- |

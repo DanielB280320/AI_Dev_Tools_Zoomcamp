@@ -103,10 +103,12 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
     volumes:
-      # Datasources only: mounting all of provisioning/ would hide the image's
-      # empty dashboards/, alerting/ and plugins/ directories, and Grafana logs
-      # an error for each one it cannot find.
+      # Datasources and dashboards only: mounting all of provisioning/ would
+      # hide the image's empty alerting/ and plugins/ directories, and Grafana
+      # logs an error for each one it cannot find.
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "127.0.0.1:3000:3000"

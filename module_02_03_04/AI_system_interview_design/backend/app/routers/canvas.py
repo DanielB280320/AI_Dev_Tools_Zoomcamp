@@ -14,6 +14,7 @@ from ..auth import SessionAccess, SessionCaller, require_editor
 from ..config import settings
 from ..errors import ApiError
 from ..events import broker
+from ..metrics import record_elements_created
 from ..models import CanvasDoc, CanvasNode, DeleteNodesRequest, UpsertNodesRequest
 from ..store import store
 from ._responses import errors
@@ -42,7 +43,7 @@ async def save_canvas(caller: SessionCaller, body: CanvasDoc, request: Request) 
     """
     require_editor(caller)
     _enforce_limits(request, body.nodes)
-    store.set_doc(caller.session.id, body.nodes)
+    record_elements_created(store.set_doc(caller.session.id, body.nodes))
     _announce(caller)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -65,7 +66,7 @@ async def upsert_nodes(
     require_editor(caller)
     merged = store.node_count(caller.session.id) + len(body.nodes)
     _enforce_limits(request, body.nodes, projected_nodes=merged)
-    store.upsert_nodes(caller.session.id, body.nodes)
+    record_elements_created(store.upsert_nodes(caller.session.id, body.nodes))
     _announce(caller)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

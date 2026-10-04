@@ -24,6 +24,9 @@ Every span and metric carries the resource below, so any one of them answers
   commit it was built from on every environment it runs in. Absent when
   unknown, rather than a placeholder that would group unrelated builds.
 
+Beyond that, the product metrics in `app/metrics.py` — rooms created, people
+in a room right now, elements added to boards.
+
 What is instrumented: every HTTP request (a server span plus the
 `http.server.*` duration metrics) and every SQL statement (a child span plus
 the pool's connection-usage metric). `/health` is left out — the compose
@@ -47,6 +50,7 @@ from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from . import __version__
+from . import metrics as product_metrics
 from .config import settings
 
 #: Requests not traced, as the instrumentation's comma-separated regexes.
@@ -113,4 +117,5 @@ def setup_telemetry(
     SQLAlchemyInstrumentor().instrument(
         tracer_provider=tracer_provider, meter_provider=meter_provider
     )
+    product_metrics.bind(meter_provider)
     return True

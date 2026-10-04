@@ -7,6 +7,7 @@ from fastapi import APIRouter, Response, status
 from ..auth import CurrentInterviewer, SessionCaller, SessionIdPath, require_host
 from ..errors import forbidden, session_not_found
 from ..events import broker
+from ..metrics import record_session_created
 from ..models import CreateSessionRequest, Session
 from ..store import store
 from ._responses import errors
@@ -27,6 +28,7 @@ async def create_session(body: CreateSessionRequest, account: CurrentInterviewer
     Empty `title` / `hostName` fall back to "Untitled interview" / "Interviewer".
     """
     record = store.create_session(account.id, body.title, body.hostName)
+    record_session_created()
     return record.to_model()
 
 

@@ -44,7 +44,7 @@ CREDS ?= 1
 
 .PHONY: help install install-api install-web api web dev test smoke lint format creds docs health db-reset clean \
 	db-up db-down db-psql db-wait api-pg test-pg db-reset-pg \
-	up down logs e2e e2e-local install-e2e obs-up obs-down obs-logs \
+	up down logs e2e e2e-local install-e2e obs-up obs-down obs-logs api-obs \
 	deploy-dev deploy-prod deploy-ci-dev deploy-ci-prod deploy-registry
 
 help: ## List the available targets
@@ -107,7 +107,13 @@ OBS := docker compose -f observability/docker-compose.yaml
 obs-up: ## Start the telemetry stack (Collector, Prometheus, Loki, Tempo, Grafana on :3000)
 	$(OBS) up -d --wait
 	@echo "Grafana: http://localhost:3000   OTLP: http://localhost:4318"
-	@echo "Send the API's telemetry there:  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make api"
+	@echo "Dashboard: http://localhost:3000/d/loopboard-product   Run the API into it: make api-obs"
+
+# Metrics every 5 s instead of the SDK's 60 s, so an action shows on the
+# dashboard while you are still looking at it.
+api-obs: ## Run the API with telemetry going to the obs-up stack (5 s metric interval)
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_METRIC_EXPORT_INTERVAL=5000 \
+		$(MAKE) --no-print-directory api
 
 obs-down: ## Stop the telemetry stack (its data survives in volumes)
 	$(OBS) down

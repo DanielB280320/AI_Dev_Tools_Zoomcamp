@@ -466,23 +466,35 @@ class Store:
             )
             return int(count or 0)
 
-    def set_doc(self, session_id: str, nodes: list[CanvasNode]) -> None:
-        """Whole-document replace: array order becomes `position`, verbatim."""
+    def set_doc(self, session_id: str, nodes: list[CanvasNode]) -> list[CanvasNode]:
+        """Whole-document replace: array order becomes `position`, verbatim.
+
+        Returns the nodes whose ids the board did not hold before — the ones
+        this write created, as opposed to re-sent unchanged or edited.
+        """
+        unique = _by_id(nodes)
         with session_scope() as db:
+            existing = set(
+                db.scalars(
+                    sa.select(CanvasNodeRow.node_id).where(CanvasNodeRow.session_id == session_id)
+                )
+            )
             db.execute(sa.delete(CanvasNodeRow).where(CanvasNodeRow.session_id == session_id))
             db.flush()
             db.add_all(
                 CanvasNodeRow.from_model(session_id, node, position)
-                for position, node in enumerate(_by_id(nodes))
+                for position, node in enumerate(unique)
             )
+        return [node for node in unique if node.id not in existing]
 
-    def upsert_nodes(self, session_id: str, nodes: list[CanvasNode]) -> None:
+    def upsert_nodes(self, session_id: str, nodes: list[CanvasNode]) -> list[CanvasNode]:
         """Merge by id: known ids are replaced in place, new ids appended.
 
         In-place replacement keeps z-order stable — `position` is the render
         order, so moving an edited node to the end would raise it above
-        everything else.
+        everything else. Returns the appended nodes, as `set_doc` does.
         """
+        created: list[CanvasNode] = []
         with session_scope() as db:
             current = {
                 row.node_id: row
@@ -498,8 +510,10 @@ class Store:
                     row = CanvasNodeRow.from_model(session_id, node, top)
                     current[node.id] = row
                     db.add(row)
+                    created.append(node)
                 else:
                     row.data = dump_node(node)
+        return created
 
     def delete_nodes(self, session_id: str, ids: list[str]) -> None:
         """Unknown ids are ignored; the gaps left in `position` are harmless."""

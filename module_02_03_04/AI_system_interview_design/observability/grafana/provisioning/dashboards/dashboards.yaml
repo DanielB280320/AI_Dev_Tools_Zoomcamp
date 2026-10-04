@@ -1,0 +1,15 @@
+# Dashboards are files in observability/grafana/dashboards/, mounted read-only.
+# Edit one in Grafana and it can't be saved back over the file: export the JSON
+# (Share ▸ Export) into that directory instead, and Grafana picks it up within
+# 30 seconds.
+
+apiVersion: 1
+
+providers:
+  - name: loopboard
+    folder: Loopboard
+    type: file
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

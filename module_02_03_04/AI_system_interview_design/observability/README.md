@@ -21,8 +21,9 @@ app ──OTLP──▶ otel-collector ──┬─ traces  ─▶ Tempo      �
 ## Use it
 
 ```bash
-make obs-up                                            # or: docker compose -f observability/docker-compose.yaml up -d --wait
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 make api
+make obs-up      # or: docker compose -f observability/docker-compose.yaml up -d --wait
+make api-obs     # the API, sending here, with metrics every 5 s
+make web         # the frontend, to do something worth measuring
 ```
 
 For the app running in Docker instead (`make up`), the Collector is on the host,
@@ -33,6 +34,27 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318 make up
 ```
 
 Then open http://localhost:3000. You're signed in as an admin automatically.
+
+**The Loopboard dashboard** (http://localhost:3000/d/loopboard-product, in the
+*Loopboard* folder) shows what people do with the app. It refreshes every 5
+seconds:
+
+| Panel | Metric (`backend/app/metrics.py`) | Moves when |
+| --- | --- | --- |
+| Interview rooms created | `loopboard_sessions_created_total` | someone creates a room (the demo seed doesn't count) |
+| People in interviews now | `loopboard_participants_active` | someone joins a live room, or stops heartbeating for 15 s, or the room ends |
+| Elements created | `loopboard_canvas_elements_created_total` | a shape, arrow, stroke or text is added; edits and moves don't count |
+
+Below the totals are the same three over time, split by participant role and
+by element type. The *Environment* selector filters on
+`deployment_environment_name`. An action shows up within about 10 seconds: one
+5-second export interval plus one refresh. With plain `make api`, which keeps
+the SDK's 60-second default interval, it takes up to a minute.
+
+Dashboards are files in `grafana/dashboards/`. To change one, edit it in
+Grafana, export the JSON over the file, and Grafana reloads it within 30
+seconds.
+
 In **Explore**:
 
 - **Tempo**: `{resource.service.name="loopboard-api"}`. Each request is a trace
@@ -65,6 +87,6 @@ receives, which is the quickest way to check whether the app is reaching it.
   access and no login form. Every UI port is bound to 127.0.0.1. Only OTLP
   listens on all interfaces, because an app container reaches it through
   `host.docker.internal`, and on Linux that's the Docker bridge, not loopback.
-- **No dashboards yet.** Datasources are provisioned; dashboards can go in
-  `grafana/provisioning/dashboards/` (and a matching mount) once there's
-  something worth keeping.
+- **Every counter series starts at 0.** Prometheus's `increase()` can't see an
+  increment on a series' first sample, so without that the first room after a
+  restart would never show up.
