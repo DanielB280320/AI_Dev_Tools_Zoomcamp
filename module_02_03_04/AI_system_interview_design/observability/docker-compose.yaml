@@ -32,7 +32,7 @@ name: loopboard-observability
 
 services:
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.162.0
+    image: otel/opentelemetry-collector-contrib:0.161.0
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
@@ -119,6 +119,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+      # A first start runs Grafana's database migrations, which took over a
+      # minute here; failures before this window ends do not count.
+      start_period: 120s
     restart: unless-stopped
 
 volumes:

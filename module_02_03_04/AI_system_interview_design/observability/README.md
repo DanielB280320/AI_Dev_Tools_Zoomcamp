@@ -12,7 +12,7 @@ app ──OTLP──▶ otel-collector ──┬─ traces  ─▶ Tempo      �
 
 | Service | Image | Host port | Role |
 | --- | --- | --- | --- |
-| otel-collector | `otel/opentelemetry-collector-contrib:0.162.0` | 4317 (gRPC), 4318 (HTTP) | The single OTLP endpoint; batches and retries |
+| otel-collector | `otel/opentelemetry-collector-contrib:0.161.0` | 4317 (gRPC), 4318 (HTTP) | The single OTLP endpoint; batches and retries |
 | prometheus | `prom/prometheus:v3.15.0` | 127.0.0.1:9090 | Metrics, received as OTLP pushes |
 | loki | `grafana/loki:3.7.8` | 127.0.0.1:3100 | Logs, received as OTLP |
 | tempo | `grafana/tempo:3.1.0` | 127.0.0.1:3200 | Traces |
