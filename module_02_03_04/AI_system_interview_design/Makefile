@@ -44,7 +44,7 @@ CREDS ?= 1
 
 .PHONY: help install install-api install-web api web dev test smoke lint format creds docs health db-reset clean \
 	db-up db-down db-psql db-wait api-pg test-pg db-reset-pg \
-	up down logs e2e e2e-local install-e2e obs-up obs-down obs-logs api-obs \
+	up down logs e2e e2e-local install-e2e obs-up obs-down obs-logs api-obs alert-agent alert-agent-dry-run \
 	deploy-dev deploy-prod deploy-ci-dev deploy-ci-prod deploy-registry deploy-observability
 
 help: ## List the available targets
@@ -120,6 +120,12 @@ obs-down: ## Stop the telemetry stack (its data survives in volumes)
 
 obs-logs: ## Follow the Collector's logs (a line per batch it receives)
 	$(OBS) logs -f otel-collector
+
+alert-agent: ## Watch Grafana alerts; on one, run a headless Claude session to diagnose it (ops/alert-agent)
+	python3 ops/alert-agent/watch.py $(ARGS)
+
+alert-agent-dry-run: ## One poll: gather evidence for firing alerts and write the prompt, no Claude
+	python3 ops/alert-agent/watch.py --once --dry-run $(ARGS)
 
 install-e2e: ## Install the end-to-end suite's dependencies (npm)
 	cd $(E2E) && npm install
