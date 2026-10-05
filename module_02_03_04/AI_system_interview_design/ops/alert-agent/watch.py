@@ -87,9 +87,12 @@ INSTANCE_COMMANDS = [
     "echo '## image'; cat /etc/loopboard/image",
     "echo '## deploy.env'; cat /etc/loopboard/deploy.env",
     "echo '## containers'; cd /opt/loopboard/app/deploy && docker compose -f docker-compose.prod.yaml ps",
+    # The container health check calls /health every 3 s; left in, it is
+    # nearly every line of the tail and pushes out the ones that matter.
     (
-        "echo '## app logs, last 30 min'; cd /opt/loopboard/app/deploy && "
-        "docker compose -f docker-compose.prod.yaml logs --no-color --since 30m --tail 400 app"
+        "echo '## app logs, last 30 min, health checks left out'; cd /opt/loopboard/app/deploy && "
+        "docker compose -f docker-compose.prod.yaml logs --no-color --since 30m app "
+        "| grep -v '\"GET /health ' | tail -n 400"
     ),
 ]
 
