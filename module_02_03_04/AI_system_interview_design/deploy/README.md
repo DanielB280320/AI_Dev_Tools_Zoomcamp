@@ -306,6 +306,40 @@ instance's root volume (Prometheus and Loki keep 7 days, Tempo 14), so
 replacing the instance starts it empty. Dashboards and datasources come back,
 because they're provisioned from the repository.
 
+### Alerts
+
+Two rules, provisioned from `observability/grafana/provisioning/alerting/rules.yaml`
+and listed in Grafana under *Alerting ▸ Alert rules* (folder *Loopboard
+alerts*). Each one fires separately per environment:
+
+| Rule | Fires when | Severity |
+| --- | --- | --- |
+| Canvas writes failing | over 5% of `PUT /canvas` / `PATCH /canvas/nodes` return a 5xx over 5 min, for 1 min | critical |
+| API returning server errors | over 2% of all API requests return a 5xx over 5 min, for 2 min | warning |
+
+No contact point is set up, so a firing alert shows in Grafana and notifies
+nobody.
+
+### Testing an alert
+
+`LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE` makes a share of canvas saves that add
+an element fail with a 500. Edits, moves and deletes are never affected. It
+defaults to 0 (off), which is what the tests and the e2e suite run with, so CI
+never sees it. Set it on one environment to make a failure only that
+environment has:
+
+```bash
+# on the instance (aws ssm start-session …), e.g. prod:
+echo LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE=0.3 | sudo tee -a /etc/loopboard/deploy.env
+sudo /opt/loopboard/app/deploy/bootstrap.sh     # restarts the app with it
+```
+
+Then add a few elements to a board. About 30% of saves fail, the app logs
+`Injected fault: …` for each, and *Canvas writes failing* fires for that
+environment within about two minutes. **To stop it**, delete the line (or set
+it to 0) and re-run `bootstrap.sh`. Once there are no new failures, the alert
+resolves after the 5-minute window has passed.
+
 **If an app stack is recreated,** its security group changes. Update
 `DevAppSecurityGroupId` / `ProdAppSecurityGroupId` in `observability.env` and
 run `make deploy-observability`, or the new instance's telemetry is refused.

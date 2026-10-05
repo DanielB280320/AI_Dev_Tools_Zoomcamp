@@ -67,6 +67,12 @@ In **Explore**:
 - **Loki**: `{service_name="loopboard-api"}`. The backend doesn't export logs
   yet, so this stays empty until it does. The pipeline is already in place.
 
+**Alerts:** two rules ("Canvas writes failing", "API returning server errors")
+are provisioned from `grafana/provisioning/alerting/rules.yaml`, under
+*Alerting ▸ Alert rules*. To see one fire, run the API with
+`LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE=0.5` and add elements to a board
+([deploy/README.md, "Testing an alert"](../deploy/README.md#testing-an-alert)).
+
 `make obs-logs` follows the Collector's log. It prints a line for each batch it
 receives, which is the quickest way to check whether the app is reaching it.
 `make obs-down` stops the stack and keeps the data;

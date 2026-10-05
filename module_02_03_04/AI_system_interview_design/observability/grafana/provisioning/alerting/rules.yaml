@@ -1,0 +1,97 @@
+# Alert rules, evaluated by Grafana against Prometheus. One alert instance per
+# environment (they group by deployment_environment_name), so a failure on
+# prod fires for prod and leaves dev green.
+#
+# Visible in Grafana under Alerting ▸ Alert rules. No contact point is
+# configured yet, so a firing alert notifies nobody; add one in the UI or as a
+# provisioning file beside this one.
+#
+# Provisioned rules are read-only in the UI: change them here.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: loopboard-api
+    folder: Loopboard alerts
+    # Short, so a deliberate fault (LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE)
+    # shows within a couple of minutes of the first failed write.
+    interval: 30s
+    rules:
+      - uid: loopboard-canvas-write-errors
+        title: Canvas writes failing
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              # Share of canvas saves (PUT /canvas, PATCH /canvas/nodes) that
+              # ended in a 5xx over the last 5 minutes. With no failures the
+              # numerator is empty, which reads as no data: see noDataState.
+              expr: >-
+                sum by (deployment_environment_name) (rate(http_server_duration_milliseconds_count{http_target=~"/sessions/.+/canvas(/nodes)?", http_method=~"PUT|PATCH", http_status_code=~"5.."}[5m]))
+                /
+                sum by (deployment_environment_name) (rate(http_server_duration_milliseconds_count{http_target=~"/sessions/.+/canvas(/nodes)?", http_method=~"PUT|PATCH"}[5m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.05]}
+        # No failing writes, or no writes at all, is healthy.
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            {{ humanizePercentage $values.A.Value }} of canvas saves are failing
+            on {{ $labels.deployment_environment_name }}
+          description: >-
+            More than 5% of PUT /canvas and PATCH /canvas/nodes requests returned
+            a 5xx over the last 5 minutes, so people's edits — new elements most
+            likely — are not being saved. If LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE
+            is set on that environment, this is the injected fault.
+
+      - uid: loopboard-api-errors
+        title: API returning server errors
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              # Every route, so a failure anywhere is caught, not only on the
+              # canvas. /health is not traced and so not counted.
+              expr: >-
+                sum by (deployment_environment_name) (rate(http_server_duration_milliseconds_count{job="loopboard-api", http_status_code=~"5.."}[5m]))
+                /
+                sum by (deployment_environment_name) (rate(http_server_duration_milliseconds_count{job="loopboard-api"}[5m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.02]}
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ humanizePercentage $values.A.Value }} of API requests are failing
+            on {{ $labels.deployment_environment_name }}
+          description: >-
+            More than 2% of all API requests returned a 5xx over the last 5
+            minutes. "Canvas writes failing" narrows it down if it is the canvas.

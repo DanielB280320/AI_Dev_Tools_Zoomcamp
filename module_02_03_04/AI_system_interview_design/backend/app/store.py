@@ -466,6 +466,15 @@ class Store:
             )
             return int(count or 0)
 
+    def node_ids(self, session_id: str) -> set[str]:
+        """The ids the board holds, without reading the nodes themselves."""
+        with session_scope() as db:
+            return set(
+                db.scalars(
+                    sa.select(CanvasNodeRow.node_id).where(CanvasNodeRow.session_id == session_id)
+                )
+            )
+
     def set_doc(self, session_id: str, nodes: list[CanvasNode]) -> list[CanvasNode]:
         """Whole-document replace: array order becomes `position`, verbatim.
 

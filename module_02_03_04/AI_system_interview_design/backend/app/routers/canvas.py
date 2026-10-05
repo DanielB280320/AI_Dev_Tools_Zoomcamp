@@ -8,6 +8,9 @@ the natural seam for an op-based / CRDT channel later.
 
 from __future__ import annotations
 
+import logging
+import random
+
 from fastapi import APIRouter, Request, Response, status
 
 from ..auth import SessionAccess, SessionCaller, require_editor
@@ -43,6 +46,7 @@ async def save_canvas(caller: SessionCaller, body: CanvasDoc, request: Request) 
     """
     require_editor(caller)
     _enforce_limits(request, body.nodes)
+    _inject_creation_fault(caller.session.id, body.nodes)
     record_elements_created(store.set_doc(caller.session.id, body.nodes))
     _announce(caller)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -66,6 +70,7 @@ async def upsert_nodes(
     require_editor(caller)
     merged = store.node_count(caller.session.id) + len(body.nodes)
     _enforce_limits(request, body.nodes, projected_nodes=merged)
+    _inject_creation_fault(caller.session.id, body.nodes)
     record_elements_created(store.upsert_nodes(caller.session.id, body.nodes))
     _announce(caller)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -85,6 +90,28 @@ async def delete_nodes(caller: SessionCaller, body: DeleteNodesRequest) -> Respo
     store.delete_nodes(caller.session.id, body.ids)
     _announce(caller)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _inject_creation_fault(session_id: str, nodes: list[CanvasNode]) -> None:
+    """Fail a write that adds an element, at `fault_element_failure_rate`.
+
+    Deliberate, for testing alerting: off (0) unless the environment sets
+    LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE. Raised before anything is written,
+    so a failed write leaves the board as it was, exactly as a real 500 would.
+    Writes that only edit, move or remove elements are never touched.
+    """
+    rate = settings.fault_element_failure_rate
+    if rate <= 0:
+        return
+    existing = store.node_ids(session_id)
+    if all(node.id in existing for node in nodes) or random.random() >= rate:
+        return
+    logging.getLogger("uvicorn.error").warning(
+        "Injected fault: failing a canvas write that adds an element "
+        "(LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE=%s)",
+        rate,
+    )
+    raise ApiError(500, "internal_error", "Could not save the canvas.")
 
 
 def _announce(caller: SessionAccess) -> None:

@@ -406,3 +406,41 @@ class TestNodeOperations:
         )
 
         assert response.status_code == 413
+
+
+class TestInjectedCreationFault:
+    """LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE: a deliberate failure for testing
+    alerting, off by default."""
+
+    def test_off_by_default(self) -> None:
+        assert settings.fault_element_failure_rate == 0
+
+    def test_fails_writes_that_add_an_element_and_saves_nothing(
+        self, client: TestClient, board, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(settings, "fault_element_failure_rate", 1.0)
+        headers = board.candidate.headers
+        canvas = f"/sessions/{board.id}/canvas"
+
+        put = client.put(
+            canvas, json={"nodes": [shape("n_new", board.candidate.id)]}, headers=headers
+        )
+        patch = client.patch(
+            f"{canvas}/nodes", json={"nodes": [shape("n_new", board.candidate.id)]}, headers=headers
+        )
+
+        assert put.status_code == 500
+        assert put.json()["error"] == "internal_error"
+        assert patch.status_code == 500
+        assert client.get(canvas, headers=headers).json()["nodes"] == []
+
+    def test_leaves_edits_alone(self, client: TestClient, board, monkeypatch) -> None:
+        headers = board.candidate.headers
+        canvas = f"/sessions/{board.id}/canvas"
+        node = shape("n_kept", board.candidate.id)
+        assert client.put(canvas, json={"nodes": [node]}, headers=headers).status_code == 204
+
+        monkeypatch.setattr(settings, "fault_element_failure_rate", 1.0)
+        moved = shape("n_kept", board.candidate.id, x=50)
+        assert client.put(canvas, json={"nodes": [moved]}, headers=headers).status_code == 204
+        assert client.put(canvas, json={"nodes": []}, headers=headers).status_code == 204

@@ -32,6 +32,8 @@ LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-}
 SEED_DEMO_DATA=${SEED_DEMO_DATA:-false}
 OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
 OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+# Fault injection for testing alerts (backend/app/config.py); 0 or unset is off.
+LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE=${LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE:-0}
 
 log() { printf '\n=== %s\n' "$*"; }
 
@@ -53,6 +55,9 @@ if [[ -z $OTEL_EXPORTER_OTLP_ENDPOINT ]] && command -v aws >/dev/null; then
 	fi
 fi
 log "telemetry: ${OTEL_EXPORTER_OTLP_ENDPOINT:-off} (environment: ${LOOPBOARD_ENV:-unset})"
+if [[ $LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE != 0 ]]; then
+	log "FAULT INJECTION ON: $LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE of element-adding canvas writes will fail"
+fi
 
 # ------------------------------------------------------------------ packages --
 if ! command -v docker >/dev/null; then
@@ -150,6 +155,7 @@ LOOPBOARD_ENV=$LOOPBOARD_ENV
 OTEL_EXPORTER_OTLP_ENDPOINT=$OTEL_EXPORTER_OTLP_ENDPOINT
 OTEL_EXPORTER_OTLP_HEADERS=$OTEL_EXPORTER_OTLP_HEADERS
 GIT_COMMIT=$(git -C "$DEPLOY_DIR" rev-parse HEAD 2>/dev/null || true)
+LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE=$LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE
 ENV
 chmod 600 "$DEPLOY_DIR/.env"
 

@@ -59,6 +59,9 @@ services:
       LOOPBOARD_ENV: ${LOOPBOARD_ENV:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      # Deliberate failures for testing alerting; 0 is off (deploy/README.md,
+      # "Testing an alert").
+      LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE: ${LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE:-0}
     # Published to the compose network only; Caddy owns the host's ports.
     expose:
       - "8000"

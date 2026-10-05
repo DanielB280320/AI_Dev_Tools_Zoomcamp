@@ -38,6 +38,13 @@ def _str(name: str, default: str) -> str:
     return raw.strip() if raw and raw.strip() else default
 
 
+def _float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return float(raw)
+
+
 def _csv(name: str, default: list[str]) -> list[str]:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -136,6 +143,13 @@ class Settings:
     environment: str = field(default_factory=lambda: _str("LOOPBOARD_ENV", "local"))
     #: The commit the running image was built from; the Dockerfile sets it.
     git_commit: str = field(default_factory=lambda: _str("LOOPBOARD_GIT_COMMIT", ""))
+    #: Fault injection, for exercising alerting: the share (0.0-1.0) of canvas
+    #: writes that add an element which fail with a 500 instead. 0 — the
+    #: default, and what every test and the e2e suite run with — is off. Set it
+    #: on one environment to make a failure that only that environment has.
+    fault_element_failure_rate: float = field(
+        default_factory=lambda: _float("LOOPBOARD_FAULT_ELEMENT_FAILURE_RATE", 0.0)
+    )
     cors_origins: list[str] = field(
         default_factory=lambda: _csv(
             "LOOPBOARD_CORS_ORIGINS",
