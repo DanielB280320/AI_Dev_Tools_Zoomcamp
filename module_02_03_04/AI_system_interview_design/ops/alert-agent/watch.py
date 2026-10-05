@@ -377,12 +377,20 @@ def handle(environment: str, alerts: list[dict], grafana: Grafana, args) -> None
     log(f"  claude: exit {code}; report {'at ' + str(report) if report.exists() else 'NOT written'}")
     if report.exists():
         print(report.read_text(), flush=True)
-    # The branch stays (a PR may point at it); the checkout goes once it is
-    # unchanged. Anything uncommitted is kept for a human to look at.
+    # Clean up what the session left unused. A checkout with uncommitted work
+    # stays for a human to look at; a branch with commits stays, since a PR
+    # may point at it. A branch with nothing on it goes with its checkout.
+    def git(*command: str) -> str:
+        return subprocess.run(["git", "-C", str(REPO_ROOT), *command],
+                              capture_output=True, text=True, check=False).stdout.strip()
+
     dirty = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain"],
                            capture_output=True, text=True, check=False).stdout.strip()
     if not dirty:
-        subprocess.run(["git", "-C", str(REPO_ROOT), "worktree", "remove", str(worktree)], check=False)
+        git("worktree", "remove", str(worktree))
+        branch = f"alert-agent/{incident}"
+        if not git("rev-list", f"origin/main..{branch}"):
+            git("branch", "-D", branch)
 
 
 def poll(grafana: Grafana, args) -> None:
