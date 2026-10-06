@@ -94,6 +94,8 @@ Its suggested to create a Makefile to generate commands to run our app:
     Use an environment variable to configure which DB the server should connect to.
     Make it database-agnostic - later we will add support for other databases (e.g. Postgres).
 
+---
+
 ## Module 3:
 
 ### 1. Creating Dockerfile
@@ -172,21 +174,85 @@ When deploying the app to AWS we need to connect and give access to our coding a
     # Prompt 4:
     Are there any options to use https without buying a Domain?
 
-    # Prompt 5:
-    # Limit the role permissions to deploy any change:
+    # Prompt 5: Limit the role permissions to deploy any change:
     I want to make sure that this role has the least amount of permissions it needs to do the deployment right so it doesn't have anything extra that it doesn't need
+
+    # Prompt 6:
+    Create a CI/CD pipeline that:
+
+    - runs backend and frontend tests in parallel
+    - builds the Docker Compose stack and runs integration and end-to-end tests against it
 
 ### 7. Clean up
 
     aws cloudformation delete-stack --stack-name sdip
     aws cloudformation wait stack-delete-complete --stack-name sdip
 
+---
+
 ## Module 4:
 
 ### 1. Dev and prod environments
 
+    # Prompt 1:
     Create a second, independent copy of our deployment infrastructure for a production environment. It should be able to run alongside the existing setup, with its own separate database and compute resources.
-    The current environment will become the dev environment.
-    Domains:
-    interviews.aisl.click → will now point to production
-    dev.interviews.aisl.click → will point to the dev environment (the existing setup)
+    The current environment will become the dev environment; Also whenever we push CI/CD will deploy to the dev environment by default
+    URLs:
+    Create a new URL using AWS CloudFormation to deploy the production App
+    https://d1u9mpb2rc8ljk.cloudfront.net/ will point to the dev environment (the existing setup)
+
+    Please document it so it's always clear where the dev is where prod is and maybe we can have like a 1 super stack that describes these two stacks or somehow it's clear what is where
+
+    # Prompt 2:
+    Image tagging and promotion strategy (ECR)
+
+    We will use Amazon ECR as the image registry. In the CI/CD pipeline, the development deployment will build the Docker image once and push it to ECR. The development environment then pulls and runs that image.
+
+    When we promote from development to production, we won't rebuild. Because we already know exactly which image version is running in development, production will pull and run that same image. This guarantees that what was tested in development is what runs in production.
+
+    Version format: YYYYMMDD-HHMMSS-<git-sha>
+    Example: 20260813-163457-83242da
+
+In real production environments is suggested to use additional services like: 
+
+    - Container Orchestration: ECS, ECR
+    - Managed Databases Services: RDS, Neon
+
+### 2. Observability and monitoring: OpenTelemetry
+
+    Instrument the FastAPI backend with OpenTelemetry.
+
+    Export traces and metrics with OTLP (no collector yet). Include service name, environment and deployed git commit
+
+### 3. OTel Collectors:
+
+    # Prompt 1:
+    Add an OpenTelemetry Collector.
+
+    Create "observability/" directory with Docker Compose for:
+
+    - OpenTelemetry Collector
+    - Prometheus
+    - Loki
+    - Tempo
+    - Grafana
+
+    Keep this as a separate Compose project from the application stack
+
+    # Prompt 2: Collecting Telemetry
+    So now I want to perform an action and I want to see this action to be reflected on the dashboard So let's track this metrics so I want to track how many interviews rooms we create, How many people are active in the interviews right now and also how many elements in the interview room we create
+
+### 4. Deploy the observability stack:
+
+    Deploy the observability stack. It should be separate from the application stack.
+    Connect both development and production to it.
+
+### 5. Alerting: 
+
+    So what I want to do is now I want to test that our alerting system works So what I want to do is have a bug that will sleep into production so let's introduce a bug in such a way that it will affect some of our metrics metrics but it will not be caught by the test So what we can do is we can just let's say when somebody creates a component in the interview room sometimes it will not work can we do that I want to do this for testing
+
+### 6. On-call Enginner: 
+
+    I already want to prepare for an agent that is a script that is constantly checking the prometheus alerts When it sees that there is alert it starts a claude code session where it runs it in headless mode and figures out what the problem is and solves this problem
+
+Source: DataTalksClub
